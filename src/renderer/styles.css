@@ -3,6 +3,9 @@
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* No cursor changes anywhere inside the UI (resize cursors at window edges are OS-level). */
+input, textarea, select, button { cursor: default; }
+
 html, body {
   height: 100%;
   font-family: 'Segoe UI', system-ui, sans-serif;
@@ -13,8 +16,11 @@ html, body {
   font-size: calc(13px * var(--font-scale));
 }
 
+/* 6 px transparent gutter so the resize cursor band sits *outside* the UI */
+body { padding: 6px; }
+
 #app {
-  height: 100vh;
+  height: calc(100vh - 12px);
   display: flex;
   flex-direction: column;
   background: rgba(15, 17, 22, 0.85);
@@ -146,6 +152,7 @@ html, body {
   padding: 6px 10px;
   font-size: 12px;
   outline: none;
+  cursor: default;
 }
 #prompt:focus { border-color: #4a8cff; }
 #send {

@@ -3,7 +3,8 @@ const path = require('path');
 
 const WIN_W = 900;
 const WIN_H = 340;
-const BAR_HEIGHT = 40;         // top zone that becomes interactive on hover
+const BAR_HEIGHT = 46;         // top zone that becomes interactive on hover (bar + 6 px gutter)
+const EDGE_ZONE = 8;           // outer band where resize cursors need to be reachable
 const CURSOR_POLL_MS = 33;     // ~30 Hz — smooth enough for drag, cheap
 
 let overlay = null;
@@ -22,7 +23,9 @@ function createOverlay() {
     frame: false,
     transparent: true,
     alwaysOnTop: true,
-    resizable: false,   // no resize cursors at edges
+    resizable: true,
+    minWidth: 500,
+    minHeight: 160,
     skipTaskbar: true,
     focusable: true,
     hasShadow: false,
@@ -64,13 +67,17 @@ function startCursorPoll() {
     const insideWin = c.x >= b.x && c.x <= b.x + b.width && c.y >= b.y && c.y <= b.y + b.height;
     if (!insideWin) { setPassthrough(true); return; }
 
+    const relX = c.x - b.x;
     const relY = c.y - b.y;
     const overTopBar = relY < BAR_HEIGHT;
     // Bottom zone covers input row (~44 px) + transcript strip (~110 px when visible).
     // Being generous here is safe — user is only hovering, they haven't clicked anything.
-    const overBottom = relY > b.height - 160;
+    const overBottom = relY > b.height - 166;
+    // Outer edge band — required so Windows can render + trigger resize cursors.
+    const overEdge = relX < EDGE_ZONE || relX > b.width - EDGE_ZONE ||
+                     relY < EDGE_ZONE || relY > b.height - EDGE_ZONE;
 
-    setPassthrough(!(overTopBar || overBottom));
+    setPassthrough(!(overTopBar || overBottom || overEdge));
   }, CURSOR_POLL_MS);
 }
 function stopCursorPoll() {
