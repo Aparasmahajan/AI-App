@@ -24,3 +24,6 @@ Quick sanity checks before you use it
 Whisper up? curl http://127.0.0.1:9000/ → should not say "connection refused".
 Ollama up? curl http://127.0.0.1:11434/api/tags → should return JSON listing llama3.2:3b.
 Overlay hidden? Start a Teams "Meet now" with yourself, share screen — the overlay should be missing from the shared preview but still visible to you.
+
+
+http://127.0.0.1:9000/inference URL IG NOT WORKING
