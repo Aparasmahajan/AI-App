@@ -1,0 +1,100 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  color: #e6e6e6;
+  background: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: rgba(15, 17, 22, 0.82);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+#bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  -webkit-app-region: drag;
+  font-size: 12px;
+}
+#title { font-weight: 600; flex: 1; }
+.pill {
+  -webkit-app-region: no-drag;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  background: rgba(255,255,255,0.08);
+}
+.pill.dim { color: #888; }
+.pill.on { background: #2f8a4a; color: white; }
+
+#answer {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+#answer-body.placeholder { color: #7a7a7a; font-size: 12px; }
+#answer-body b { color: #d0d0d0; }
+#answer-body pre {
+  background: rgba(255,255,255,0.05);
+  padding: 8px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 12px;
+}
+
+#transcript-wrap {
+  max-height: 130px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  padding: 8px 12px;
+  overflow-y: auto;
+  font-size: 11px;
+}
+.label { color: #666; font-size: 10px; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+#transcript { color: #b8b8b8; white-space: pre-wrap; }
+
+#input-row {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+#prompt {
+  flex: 1;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #e6e6e6;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  outline: none;
+}
+#prompt:focus { border-color: #4a8cff; }
+#send {
+  background: #4a8cff;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+#send:hover { background: #3a7ce8; }
+#send:disabled { background: #444; cursor: not-allowed; }
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }

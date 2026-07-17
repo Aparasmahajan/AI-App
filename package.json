@@ -1,0 +1,26 @@
+{
+  "name": "stealth-assistant",
+  "version": "0.1.0",
+  "description": "Screen-share-invisible AI overlay for studying, meetings, and teaching",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --enable-logging",
+    "build": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "dependencies": {
+    "node-fetch": "^2.7.0",
+    "tesseract.js": "^5.1.0"
+  },
+  "build": {
+    "appId": "com.local.stealth-assistant",
+    "productName": "StudyOverlay",
+    "win": {
+      "target": "nsis"
+    }
+  }
+}

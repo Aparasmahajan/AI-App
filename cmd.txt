@@ -1,0 +1,26 @@
+Terminal 1 — Whisper server
+Open PowerShell:
+
+cd "C:\Users\parmahaj\Documents\New folder\AI App\addon\whisper-blas-bin-x64\Release"
+.\whisper-server.exe -m "C:\Users\parmahaj\Documents\New folder\AI App\addon\ggml-base.en.bin" --host 127.0.0.1 --port 9000
+Leave this running. You should see whisper server listening at http://127.0.0.1:9000. Test in another window with curl http://127.0.0.1:9000/ — anything other than "connection refused" means it's up.
+
+
+Terminal 2 — Ollama
+
+ollama serve
+
+ollama pull llama3.2:3b
+
+
+Terminal 3 — the Electron app
+
+cd "C:\Users\parmahaj\Documents\New folder\AI App"
+npm install
+npm start
+First npm install will take 1–3 minutes (Electron is ~200 MB). After that, the overlay appears top-right of your screen.
+
+Quick sanity checks before you use it
+Whisper up? curl http://127.0.0.1:9000/ → should not say "connection refused".
+Ollama up? curl http://127.0.0.1:11434/api/tags → should return JSON listing llama3.2:3b.
+Overlay hidden? Start a Teams "Meet now" with yourself, share screen — the overlay should be missing from the shared preview but still visible to you.

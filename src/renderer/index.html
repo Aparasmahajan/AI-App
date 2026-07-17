@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>StudyOverlay</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="bar">
+        <span id="title">StudyOverlay</span>
+        <span id="mode" class="pill dim">click-through</span>
+        <span id="listen" class="pill dim">idle</span>
+      </header>
+
+      <section id="answer">
+        <div id="answer-body" class="placeholder">
+          Hotkeys:<br/>
+          <b>Ctrl+Shift+H</b> hide/show &nbsp; <b>Ctrl+Shift+I</b> interact<br/>
+          <b>Ctrl+Shift+A</b> ask about screen &nbsp; <b>Ctrl+Shift+L</b> listen
+        </div>
+      </section>
+
+      <section id="transcript-wrap">
+        <div class="label">Live transcript</div>
+        <div id="transcript"></div>
+      </section>
+
+      <footer id="input-row">
+        <input id="prompt" placeholder="Ask anything... (uses transcript + screen as context)" />
+        <button id="send">Ask</button>
+      </footer>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
