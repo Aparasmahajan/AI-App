@@ -1,55 +1,247 @@
-// Renderer: overlay UI, audio capture (loopback + mic), OCR, LLM calls.
-// All heavy work talks to LOCAL services:
-//   - Ollama at http://127.0.0.1:11434  (LLM)
-//   - Whisper HTTP server at http://127.0.0.1:9000 (transcription) — see scripts/whisper-server.md
+// Renderer: UI, drag, audio pipeline, OCR, LLM.
+// Whisper transcription is routed through main (bypasses CORS).
 
-const OLLAMA_URL = 'http://127.0.0.1:11434/api/generate';
-const OLLAMA_MODEL = 'llama3.2:3b';
-const WHISPER_URL = 'http://127.0.0.1:9000/inference'; // whisper.cpp server endpoint
+const DEFAULTS = {
+  ollamaUrl: 'http://127.0.0.1:11434',
+  whisperUrl: 'http://127.0.0.1:9000/inference',
+  model: 'llama3.2:3b',
+  systemPrompt: 'You are a concise study/teaching assistant. Give a direct, correct answer.',
+  fontScale: 1,
+  appOpacity: 0.82,
+};
+
+const OCR_MAX_WIDTH = 1280;
+const WHISPER_SAMPLE_RATE = 16000;
+const CHUNK_SECONDS = 3;
+const CHUNK_OVERLAP_SECONDS = 0.5;
+const VAD_RMS_THRESHOLD = 0.008;
+
+// Any pointer y-coordinate below this (in window px) is treated as "over the
+// title bar" — used to auto-flip passthrough off so drag works in click-through.
+const BAR_HEIGHT_PX = 40;
 
 const els = {
+  app: document.getElementById('app'),
   answer: document.getElementById('answer-body'),
   transcript: document.getElementById('transcript'),
   prompt: document.getElementById('prompt'),
   send: document.getElementById('send'),
   mode: document.getElementById('mode'),
   listen: document.getElementById('listen'),
+  status: document.getElementById('status'),
+  bar: document.getElementById('bar'),
+  inputRow: document.getElementById('input-row'),
+  gear: document.getElementById('gear'),
+  collapse: document.getElementById('collapse'),
+  settings: document.getElementById('settings'),
+  cfgModel: document.getElementById('cfg-model'),
+  cfgRefresh: document.getElementById('cfg-refresh'),
+  cfgSystem: document.getElementById('cfg-system'),
+  cfgOllama: document.getElementById('cfg-ollama'),
+  cfgWhisper: document.getElementById('cfg-whisper'),
+  cfgSave: document.getElementById('cfg-save'),
+  cfgReset: document.getElementById('cfg-reset'),
 };
 
-let transcriptBuffer = ''; // rolling transcript from meeting audio
-let recorder = null;
+let transcriptBuffer = '';
 let listening = false;
-let audioStream = null;
+let audioCtx = null;
+let sourceNodes = [];
+let processorNode = null;
+let sampleBuffer = new Float32Array(0);
+let currentAbort = null;
+let ocrWorkerPromise = null;
+let interactive = false;
+let generating = false;
+let collapsed = false;
 
-// ---------- UI state ----------
-window.api.onInteractiveMode((interactive) => {
+// ---------- Config ----------
+function loadConfig() {
+  try { return { ...DEFAULTS, ...(JSON.parse(localStorage.getItem('cfg') || '{}')) }; }
+  catch { return { ...DEFAULTS }; }
+}
+let cfg = loadConfig();
+function saveConfig(next) {
+  cfg = { ...cfg, ...next };
+  localStorage.setItem('cfg', JSON.stringify(cfg));
+}
+function applyVisualConfig() {
+  document.documentElement.style.setProperty('--font-scale', cfg.fontScale);
+  document.documentElement.style.setProperty('--app-opacity', cfg.appOpacity);
+}
+applyVisualConfig();
+
+// ---------- Status ----------
+function setStatus(text, on = false) {
+  els.status.textContent = text || '';
+  els.status.className = 'pill ' + (on ? 'on' : 'dim');
+}
+
+function setGenerating(v) {
+  generating = v;
+  els.send.textContent = v ? 'Stop' : 'Ask';
+  els.send.classList.toggle('stop', v);
+}
+
+// ---------- Drag / passthrough via continuous mousemove ----------
+// With `setIgnoreMouseEvents(true, {forward: true})`, Electron forwards mousemove
+// to the renderer even while passthrough is on. We use those events to detect
+// when the pointer is over an interactive region and flip passthrough off.
+// mouseenter/mouseleave on DOM elements don't fire reliably in passthrough mode,
+// so we do position-based detection on document instead.
+let passthrough = true;
+function isOverInteractive(x, y) {
+  if (interactive) return true;
+  if (y < BAR_HEIGHT_PX) return true;                                     // top bar
+  if (!els.settings.hidden && els.settings.contains(document.elementFromPoint(x, y))) return true;
+  const inputRect = els.inputRow.getBoundingClientRect();
+  if (y >= inputRect.top && y <= inputRect.bottom) return true;           // bottom input row
+  return false;
+}
+document.addEventListener('mousemove', (e) => {
+  const over = isOverInteractive(e.clientX, e.clientY);
+  if (over && passthrough) {
+    passthrough = false;
+    window.api.setMousePassthrough(false);
+  } else if (!over && !passthrough) {
+    passthrough = true;
+    window.api.setMousePassthrough(true);
+  }
+});
+
+// Manual drag on the bar — works because we've already turned passthrough off
+// by the time mouse is over the bar. We use the Electron-native `-webkit-app-region: drag`
+// on the bar via CSS below, but we ALSO implement JS drag as a fallback in case
+// the app-region trick lags behind the passthrough toggle.
+let dragging = false;
+let dragStartX = 0, dragStartY = 0;
+els.bar.addEventListener('mousedown', (e) => {
+  if (e.target.closest('button') || e.target.closest('.pill')) return;
+  dragging = true;
+  dragStartX = e.screenX;
+  dragStartY = e.screenY;
+});
+window.addEventListener('mousemove', (e) => {
+  if (!dragging) return;
+  const dx = e.screenX - dragStartX;
+  const dy = e.screenY - dragStartY;
+  if (dx || dy) {
+    dragStartX = e.screenX;
+    dragStartY = e.screenY;
+    window.moveBy(dx, dy);
+  }
+});
+window.addEventListener('mouseup', () => { dragging = false; });
+
+// ---------- Hotkey / IPC wiring ----------
+window.api.onInteractiveMode((v) => {
+  interactive = v;
   els.mode.textContent = interactive ? 'interactive' : 'click-through';
   els.mode.className = 'pill ' + (interactive ? 'on' : 'dim');
+  if (interactive) { passthrough = false; window.api.setMousePassthrough(false); }
 });
-
 window.api.onTriggerScreenAsk(() => askAboutScreen());
 window.api.onToggleListen(() => (listening ? stopListening() : startListening()));
-
-els.send.addEventListener('click', () => askFromInput());
-els.prompt.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') askFromInput();
+window.api.onCancelAll(() => cancelAll());
+window.api.onToggleCollapse(() => toggleCollapse());
+window.api.onFontDelta((d) => {
+  cfg.fontScale = Math.max(0.7, Math.min(2.0, +(cfg.fontScale + d * 0.1).toFixed(2)));
+  saveConfig({ fontScale: cfg.fontScale });
+  applyVisualConfig();
+  setStatus(`font ${Math.round(cfg.fontScale * 100)}%`);
+  setTimeout(() => setStatus(''), 900);
+});
+window.api.onOpacityDelta((d) => {
+  cfg.appOpacity = Math.max(0.2, Math.min(1.0, +(cfg.appOpacity + d).toFixed(2)));
+  saveConfig({ appOpacity: cfg.appOpacity });
+  applyVisualConfig();
+  setStatus(`opacity ${Math.round(cfg.appOpacity * 100)}%`);
+  setTimeout(() => setStatus(''), 900);
 });
 
+els.send.addEventListener('click', () => (generating ? cancelAll() : askFromInput()));
+els.prompt.addEventListener('keydown', (e) => { if (e.key === 'Enter') askFromInput(); });
+els.collapse.addEventListener('click', toggleCollapse);
+
+function toggleCollapse() {
+  collapsed = !collapsed;
+  els.app.classList.toggle('collapsed', collapsed);
+  els.collapse.textContent = collapsed ? '+' : '–';
+}
+
+// ---------- Settings panel ----------
+els.gear.addEventListener('click', () => {
+  const showing = els.settings.hidden;
+  els.settings.hidden = !showing;
+  if (showing) hydrateSettings();
+});
+els.cfgRefresh.addEventListener('click', populateModels);
+els.cfgSave.addEventListener('click', () => {
+  saveConfig({
+    ollamaUrl: els.cfgOllama.value.trim() || DEFAULTS.ollamaUrl,
+    whisperUrl: els.cfgWhisper.value.trim() || DEFAULTS.whisperUrl,
+    model: els.cfgModel.value || DEFAULTS.model,
+    systemPrompt: els.cfgSystem.value.trim() || DEFAULTS.systemPrompt,
+  });
+  setStatus('settings saved');
+  setTimeout(() => setStatus(''), 1200);
+  els.settings.hidden = true;
+});
+els.cfgReset.addEventListener('click', () => {
+  saveConfig({ ...DEFAULTS });
+  hydrateSettings();
+  applyVisualConfig();
+  setStatus('reset');
+  setTimeout(() => setStatus(''), 1000);
+});
+
+function hydrateSettings() {
+  els.cfgOllama.value = cfg.ollamaUrl;
+  els.cfgWhisper.value = cfg.whisperUrl;
+  els.cfgSystem.value = cfg.systemPrompt;
+  populateModels();
+}
+async function populateModels() {
+  els.cfgModel.innerHTML = '<option>loading...</option>';
+  const list = await window.api.listOllamaModels();
+  els.cfgModel.innerHTML = '';
+  const models = list.length ? list : [cfg.model];
+  if (!models.includes(cfg.model)) models.unshift(cfg.model);
+  for (const m of models) {
+    const opt = document.createElement('option');
+    opt.value = m; opt.textContent = m;
+    if (m === cfg.model) opt.selected = true;
+    els.cfgModel.appendChild(opt);
+  }
+}
+
+// ---------- Cancel ----------
+function cancelAll() {
+  if (currentAbort) { currentAbort.abort(); currentAbort = null; }
+  setGenerating(false);
+  setStatus('cancelled');
+  setTimeout(() => setStatus(''), 1200);
+}
+
 // ---------- LLM ----------
-async function askOllama(prompt, onToken) {
-  const res = await fetch(OLLAMA_URL, {
+async function askOllama(userPrompt, extraContext, onToken, signal) {
+  const ctxParts = [
+    transcriptBuffer && `# Recent conversation transcript\n${transcriptBuffer.slice(-2000)}`,
+    extraContext && `# On-screen text\n${extraContext.slice(-2000)}`,
+  ].filter(Boolean).join('\n\n');
+  const fullPrompt = `${cfg.systemPrompt}\n\n${ctxParts}\n\n# Question\n${userPrompt}\n\n# Answer`;
+
+  const res = await fetch(`${cfg.ollamaUrl.replace(/\/$/, '')}/api/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: OLLAMA_MODEL, prompt, stream: true }),
+    body: JSON.stringify({ model: cfg.model, prompt: fullPrompt, stream: true }),
+    signal,
   });
-
-  if (!res.ok) throw new Error(`Ollama HTTP ${res.status} — is 'ollama serve' running and is '${OLLAMA_MODEL}' pulled?`);
+  if (!res.ok) throw new Error(`Ollama HTTP ${res.status} — is 'ollama serve' running and '${cfg.model}' pulled?`);
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let full = '';
-  let buf = '';
-
+  let full = '', buf = '';
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -58,13 +250,7 @@ async function askOllama(prompt, onToken) {
     buf = lines.pop();
     for (const line of lines) {
       if (!line.trim()) continue;
-      try {
-        const j = JSON.parse(line);
-        if (j.response) {
-          full += j.response;
-          onToken(full);
-        }
-      } catch {}
+      try { const j = JSON.parse(line); if (j.response) { full += j.response; onToken(full); } } catch {}
     }
   }
   return full;
@@ -72,7 +258,6 @@ async function askOllama(prompt, onToken) {
 
 function renderAnswer(text) {
   els.answer.classList.remove('placeholder');
-  // Minimal markdown: code fences + bold
   const html = text
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/```([\s\S]*?)```/g, (_, c) => `<pre>${c}</pre>`)
@@ -82,18 +267,21 @@ function renderAnswer(text) {
 }
 
 async function ask(userPrompt, extraContext = '') {
-  const context = [
-    transcriptBuffer && `# Recent conversation transcript\n${transcriptBuffer.slice(-2000)}`,
-    extraContext && `# On-screen text\n${extraContext.slice(-2000)}`,
-  ].filter(Boolean).join('\n\n');
-
-  const prompt = `You are a concise study/teaching assistant. Give a direct, correct answer.\n\n${context}\n\n# Question\n${userPrompt}\n\n# Answer`;
-
-  renderAnswer('...thinking');
+  cancelAll();
+  currentAbort = new AbortController();
+  setGenerating(true);
+  setStatus('thinking', true);
+  renderAnswer('...');
   try {
-    await askOllama(prompt, renderAnswer);
+    await askOllama(userPrompt, extraContext, renderAnswer, currentAbort.signal);
+    setStatus('done'); setTimeout(() => setStatus(''), 1000);
   } catch (e) {
+    if (e.name === 'AbortError') return;
     renderAnswer(`**Error:** ${e.message}`);
+    setStatus('error');
+  } finally {
+    setGenerating(false);
+    currentAbort = null;
   }
 }
 
@@ -105,77 +293,110 @@ async function askFromInput() {
 }
 
 // ---------- OCR ----------
-async function askAboutScreen() {
-  renderAnswer('...reading screen');
-  const dataUrl = await window.api.captureScreen();
-  if (!dataUrl) return renderAnswer('**Error:** could not capture screen');
+async function getOcrWorker() {
+  if (!ocrWorkerPromise) {
+    setStatus('loading OCR', true);
+    ocrWorkerPromise = Tesseract.createWorker('eng').then((w) => { setStatus(''); return w; });
+  }
+  return ocrWorkerPromise;
+}
+getOcrWorker().catch((e) => console.warn('OCR preload failed:', e));
 
-  const { createWorker } = await import('../../node_modules/tesseract.js/src/index.js').catch(() => require('tesseract.js'));
-  const worker = await createWorker('eng');
-  const { data: { text } } = await worker.recognize(dataUrl);
-  await worker.terminate();
-
-  const question = els.prompt.value.trim() || 'Explain what is on screen and answer any visible question.';
-  await ask(question, text);
+async function downscale(dataUrl, maxW) {
+  const img = new Image();
+  await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = dataUrl; });
+  if (img.width <= maxW) return dataUrl;
+  const scale = maxW / img.width;
+  const canvas = document.createElement('canvas');
+  canvas.width = maxW;
+  canvas.height = Math.round(img.height * scale);
+  canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/png');
 }
 
-// ---------- Audio (loopback + mic) → Whisper ----------
+async function askAboutScreen() {
+  cancelAll();
+  currentAbort = new AbortController();
+  setGenerating(true);
+  const signal = currentAbort.signal;
+  try {
+    setStatus('capturing', true); renderAnswer('...capturing screen');
+    const raw = await window.api.captureScreen();
+    if (signal.aborted) return;
+    if (!raw) { renderAnswer('**Error:** could not capture screen'); return; }
+
+    setStatus('shrinking', true);
+    const small = await downscale(raw, OCR_MAX_WIDTH);
+    if (signal.aborted) return;
+
+    setStatus('OCR', true); renderAnswer('...reading text');
+    const worker = await getOcrWorker();
+    if (signal.aborted) return;
+    const { data: { text } } = await worker.recognize(small);
+    if (signal.aborted) return;
+
+    const q = els.prompt.value.trim() || 'Explain what is on screen and answer any visible question directly.';
+    setStatus('thinking', true); renderAnswer('...');
+    await askOllama(q, text, renderAnswer, signal);
+    setStatus('done'); setTimeout(() => setStatus(''), 1000);
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    renderAnswer(`**Error:** ${e.message}`);
+    setStatus('error');
+  } finally {
+    setGenerating(false);
+    currentAbort = null;
+  }
+}
+
+// ---------- Audio pipeline ----------
 async function startListening() {
   try {
-    // getDisplayMedia is routed by main.js to loopback audio + primary screen.
-    let displayStream = null;
-    try {
-      displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-    } catch (e) {
-      console.warn('display capture failed:', e.message);
-    }
+    let displayStream = null, micStream = null;
+    try { displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }); }
+    catch (e) { console.warn('loopback capture failed:', e.message); }
+    try { micStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { console.warn('mic denied:', e.message); }
 
-    // Mic capture (your own voice)
-    let micStream = null;
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (e) {
-      console.warn('mic denied:', e.message);
-    }
+    if (!displayStream && !micStream) throw new Error('No audio sources. Check Windows Settings → Privacy → Microphone.');
 
-    if (!displayStream && !micStream) {
-      throw new Error('No audio sources available. Check Windows mic privacy settings: Settings → Privacy → Microphone → allow desktop apps.');
-    }
-
-    // Mix whatever we got into one stream
-    const ctx = new AudioContext();
-    const dest = ctx.createMediaStreamDestination();
+    audioCtx = new AudioContext({ sampleRate: WHISPER_SAMPLE_RATE });
+    const mixer = audioCtx.createGain();
     if (displayStream && displayStream.getAudioTracks().length) {
-      ctx.createMediaStreamSource(new MediaStream(displayStream.getAudioTracks())).connect(dest);
+      const src = audioCtx.createMediaStreamSource(new MediaStream(displayStream.getAudioTracks()));
+      src.connect(mixer);
+      sourceNodes.push({ node: src, stream: displayStream });
     }
     if (micStream) {
-      ctx.createMediaStreamSource(micStream).connect(dest);
+      const src = audioCtx.createMediaStreamSource(micStream);
+      src.connect(mixer);
+      sourceNodes.push({ node: src, stream: micStream });
     }
 
-    audioStream = { display: displayStream, mic: micStream, ctx };
+    processorNode = audioCtx.createScriptProcessor(4096, 1, 1);
+    processorNode.onaudioprocess = (e) => {
+      const input = e.inputBuffer.getChannelData(0);
+      const merged = new Float32Array(sampleBuffer.length + input.length);
+      merged.set(sampleBuffer);
+      merged.set(input, sampleBuffer.length);
+      sampleBuffer = merged;
 
-    recorder = new MediaRecorder(dest.stream, { mimeType: 'audio/webm;codecs=opus' });
-    const chunks = [];
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunks.push(e.data);
-    };
-    recorder.onstop = async () => {
-      const blob = new Blob(chunks, { type: 'audio/webm' });
-      chunks.length = 0;
-      transcribeChunk(blob);
-      if (listening) {
-        recorder.start();
-        setTimeout(() => recorder.state === 'recording' && recorder.stop(), 6000);
+      const chunkSize = WHISPER_SAMPLE_RATE * CHUNK_SECONDS;
+      const overlapSize = WHISPER_SAMPLE_RATE * CHUNK_OVERLAP_SECONDS;
+      if (sampleBuffer.length >= chunkSize) {
+        const chunk = sampleBuffer.slice(0, chunkSize);
+        sampleBuffer = sampleBuffer.slice(chunkSize - overlapSize);
+        dispatchChunk(chunk);
       }
     };
+    mixer.connect(processorNode);
+    processorNode.connect(audioCtx.destination);
 
     listening = true;
     els.listen.textContent = 'listening';
     els.listen.className = 'pill on';
-    recorder.start();
-    setTimeout(() => recorder.state === 'recording' && recorder.stop(), 6000);
   } catch (e) {
-    renderAnswer(`**Mic/audio error:** ${e.message}`);
+    renderAnswer(`**Audio error:** ${e.message}`);
     listening = false;
   }
 }
@@ -184,29 +405,66 @@ function stopListening() {
   listening = false;
   els.listen.textContent = 'idle';
   els.listen.className = 'pill dim';
-  if (recorder && recorder.state === 'recording') recorder.stop();
-  audioStream?.display?.getTracks().forEach((t) => t.stop());
-  audioStream?.mic?.getTracks().forEach((t) => t.stop());
-  audioStream?.ctx?.close();
-  audioStream = null;
+  if (processorNode) { try { processorNode.disconnect(); } catch {} processorNode = null; }
+  for (const s of sourceNodes) {
+    try { s.node.disconnect(); } catch {}
+    try { s.stream.getTracks().forEach((t) => t.stop()); } catch {}
+  }
+  sourceNodes = [];
+  if (audioCtx) { try { audioCtx.close(); } catch {} audioCtx = null; }
+  sampleBuffer = new Float32Array(0);
 }
 
-async function transcribeChunk(blob) {
-  try {
-    const fd = new FormData();
-    fd.append('file', blob, 'chunk.webm');
-    fd.append('temperature', '0');
-    fd.append('response_format', 'json');
+function rms(samples) {
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+  return Math.sqrt(sum / samples.length);
+}
 
-    const res = await fetch(WHISPER_URL, { method: 'POST', body: fd });
-    if (!res.ok) throw new Error(`Whisper HTTP ${res.status}`);
-    const j = await res.json();
-    const text = (j.text || '').trim();
+async function dispatchChunk(samples) {
+  if (rms(samples) < VAD_RMS_THRESHOLD) return;
+  const wav = encodeWAV(samples, WHISPER_SAMPLE_RATE);
+  transcribeChunk(wav);
+}
+
+function encodeWAV(samples, sampleRate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeStr(8, 'WAVE'); writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  writeStr(36, 'data'); view.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return buffer;
+}
+
+async function transcribeChunk(wavArrayBuffer) {
+  try {
+    const result = await window.api.transcribe(cfg.whisperUrl, wavArrayBuffer);
+    if (result.error) throw new Error(result.error);
+    const text = result.text;
     if (!text) return;
-    transcriptBuffer += ' ' + text;
+
+    const tail = transcriptBuffer.slice(-80).toLowerCase();
+    const head = text.slice(0, 80).toLowerCase();
+    let overlap = 0;
+    for (let n = Math.min(tail.length, head.length); n > 4; n--) {
+      if (tail.endsWith(head.slice(0, n))) { overlap = n; break; }
+    }
+    const cleaned = overlap ? text.slice(overlap) : text;
+    if (!cleaned.trim()) return;
+
+    transcriptBuffer += ' ' + cleaned;
     els.transcript.textContent = transcriptBuffer.slice(-1200);
     els.transcript.scrollTop = els.transcript.scrollHeight;
   } catch (e) {
-    els.transcript.textContent = `[transcription unavailable: ${e.message}] ` + els.transcript.textContent;
+    els.transcript.textContent = `[transcription unavailable: ${e.message}]\n` + els.transcript.textContent;
   }
 }
