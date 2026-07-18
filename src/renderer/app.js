@@ -50,7 +50,91 @@ const els = {
   transcriptWrap: document.getElementById('transcript-wrap'),
   transcript: document.getElementById('transcript'),
   txClear: document.getElementById('tx-clear'),
+  mic: document.getElementById('mic'),
 };
+
+// ---------- Tap-to-record → whisper-cli → fill Ask input ----------
+// Independent of the Ctrl+Shift+L continuous-listening flow. Click mic to start
+// recording, click again to stop and transcribe. Result goes into the prompt.
+let micRecording = false;
+let micStream = null;
+let micCtx = null;
+let micProcessor = null;
+let micSource = null;
+let micSamples = new Float32Array(0);
+const MIC_SAMPLE_RATE = 16000;
+const MIC_MAX_SECONDS = 60; // safety cap
+els.mic.addEventListener('click', () => (micRecording ? stopMicRecording() : startMicRecording()));
+
+async function startMicRecording() {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    setStatus(`mic denied: ${e.message}`);
+    setTimeout(() => setStatus(''), 3000);
+    return;
+  }
+  micCtx = new AudioContext({ sampleRate: MIC_SAMPLE_RATE });
+  micSource = micCtx.createMediaStreamSource(micStream);
+  micProcessor = micCtx.createScriptProcessor(4096, 1, 1);
+  micSamples = new Float32Array(0);
+  micProcessor.onaudioprocess = (e) => {
+    const input = e.inputBuffer.getChannelData(0);
+    const merged = new Float32Array(micSamples.length + input.length);
+    merged.set(micSamples);
+    merged.set(input, micSamples.length);
+    micSamples = merged;
+    if (micSamples.length > MIC_SAMPLE_RATE * MIC_MAX_SECONDS) stopMicRecording();
+  };
+  micSource.connect(micProcessor);
+  micProcessor.connect(micCtx.destination);
+
+  micRecording = true;
+  els.mic.textContent = '■';
+  els.mic.classList.add('recording');
+  setStatus('recording', true);
+}
+
+async function stopMicRecording() {
+  if (!micRecording) return;
+  micRecording = false;
+  els.mic.classList.remove('recording');
+  els.mic.classList.add('transcribing');
+  els.mic.textContent = '…';
+  setStatus('transcribing', true);
+
+  try { micProcessor.disconnect(); } catch {}
+  try { micSource.disconnect(); } catch {}
+  try { micStream.getTracks().forEach((t) => t.stop()); } catch {}
+  try { micCtx.close(); } catch {}
+
+  const samples = micSamples;
+  micSamples = new Float32Array(0);
+  if (samples.length < MIC_SAMPLE_RATE * 0.3) {
+    setStatus('too short'); setTimeout(() => setStatus(''), 1500);
+    els.mic.classList.remove('transcribing');
+    els.mic.textContent = '🎙';
+    return;
+  }
+
+  const wav = encodeWAV(samples, MIC_SAMPLE_RATE);
+  const result = await window.api.transcribe(wav);
+  els.mic.classList.remove('transcribing');
+  els.mic.textContent = '🎙';
+
+  if (result.error) {
+    setStatus(`whisper: ${result.error}`);
+    setTimeout(() => setStatus(''), 4000);
+    return;
+  }
+  const text = (result.text || '').trim();
+  if (!text) { setStatus('no speech detected'); setTimeout(() => setStatus(''), 1500); return; }
+
+  // Append (with a space) if there's already text in the input, so user can dictate additions.
+  els.prompt.value = els.prompt.value ? `${els.prompt.value} ${text}` : text;
+  els.prompt.focus();
+  setStatus('done'); setTimeout(() => setStatus(''), 1000);
+}
 
 els.txClear.addEventListener('click', () => {
   transcriptBuffer = '';
@@ -173,7 +257,7 @@ els.gear.addEventListener('click', () => {
 els.cfgRefresh.addEventListener('click', populateModels);
 els.cfgTest.addEventListener('click', async () => {
   els.cfgTest.textContent = '...';
-  const r = await window.api.testWhisper(els.cfgWhisper.value.trim() || cfg.whisperUrl);
+  const r = await window.api.testWhisper();
   els.cfgTest.textContent = 'test';
   if (r.ok) setStatus(`whisper ok (HTTP ${r.status})`, true);
   else setStatus(`whisper: ${r.error}`, false);
@@ -723,7 +807,7 @@ function encodeWAV(samples, sampleRate) {
 }
 
 async function transcribeChunk(wavArrayBuffer) {
-  const result = await window.api.transcribe(cfg.whisperUrl, wavArrayBuffer);
+  const result = await window.api.transcribe(wavArrayBuffer);
   if (result.error) {
     console.warn(`[whisper] ERROR: ${result.error}`);
   } else {
