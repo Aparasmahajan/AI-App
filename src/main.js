@@ -1,10 +1,17 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer, screen, session } = require('electron');
 const path = require('path');
 const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const { spawn } = require('child_process');
 const { URL } = require('url');
 
-const WIN_W = 900;
-const WIN_H = 340;
+// Bundled whisper-cli.exe + model. These paths are hardcoded to your addon/ tree.
+const WHISPER_CLI = path.join(__dirname, '..', 'addon', 'whisper-blas-bin-x64', 'Release', 'whisper-cli.exe');
+const WHISPER_MODEL = path.join(__dirname, '..', 'addon', 'ggml-base.en.bin');
+
+const WIN_W = 900; 
+const WIN_H = 600; 
 const BAR_HEIGHT = 46;         // top zone that becomes interactive on hover (bar + 6 px gutter)
 const CURSOR_POLL_MS = 33;     // ~30 Hz — smooth enough for drag, cheap
 
@@ -168,6 +175,14 @@ ipcMain.on('set-collapsed', (_e, collapsed) => {
   }
 });
 
+// Grow the window downward by `delta` px when the transcript appears; shrink
+// back when it hides. Answer area stays untouched.
+ipcMain.on('grow-window', (_e, delta) => {
+  if (!overlay) return;
+  const b = overlay.getBounds();
+  overlay.setBounds({ x: b.x, y: b.y, width: b.width, height: Math.max(160, b.height + delta) });
+});
+
 // Manual resize driven entirely from main using OS cursor position — reliable
 // even when the cursor is dragged outside the window bounds.
 let resizeState = null;
@@ -196,8 +211,10 @@ ipcMain.handle('list-ollama-models', async () => {
   } catch { return []; }
 });
 
-ipcMain.handle('whisper-test', async (_e, url) => {
-  // Real end-to-end test: send a 3s silent WAV via the same path real chunks use.
+ipcMain.handle('whisper-test', async () => {
+  if (!fs.existsSync(WHISPER_CLI)) return { ok: false, error: `cli not found: ${WHISPER_CLI}` };
+  if (!fs.existsSync(WHISPER_MODEL)) return { ok: false, error: `model not found: ${WHISPER_MODEL}` };
+  // Real end-to-end test: 3s of quiet silence WAV through whisper-cli.
   const sampleRate = 16000, samples = sampleRate * 3;
   const buf = Buffer.alloc(44 + samples * 2);
   buf.write('RIFF', 0);
@@ -207,7 +224,7 @@ ipcMain.handle('whisper-test', async (_e, url) => {
   buf.writeUInt32LE(sampleRate, 24); buf.writeUInt32LE(sampleRate * 2, 28);
   buf.writeUInt16LE(2, 32); buf.writeUInt16LE(16, 34);
   buf.write('data', 36); buf.writeUInt32LE(samples * 2, 40);
-  const r = await postMultipart(url, buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+  const r = await runWhisperCli(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
   if (r.error) return { ok: false, error: r.error };
   return { ok: true, status: 200 };
 });
@@ -274,14 +291,61 @@ function postMultipart(url, wavBuffer) {
   });
 }
 
-// Serialize — whisper-server processes one chunk at a time; drop overlapping requests.
+// Whisper via whisper-cli.exe subprocess. The bundled whisper-server.exe is
+// unreliable — it drops POST bodies or resets connections. whisper-cli reads a
+// WAV file and writes a .txt file. Slower per call (~2-4s) since the model
+// reloads each time, but it actually returns real transcriptions.
 let whisperBusy = false;
 
-ipcMain.handle('whisper-transcribe', async (_e, { url, wavBuffer }) => {
+function runWhisperCli(wavBuffer) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(WHISPER_CLI)) return resolve({ error: `whisper-cli not found at ${WHISPER_CLI}` });
+    if (!fs.existsSync(WHISPER_MODEL)) return resolve({ error: `model not found at ${WHISPER_MODEL}` });
+
+    const tmpBase = path.join(os.tmpdir(), `sw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const wavPath = tmpBase + '.wav';
+    const txtPath = tmpBase + '.txt';
+    try { fs.writeFileSync(wavPath, Buffer.from(wavBuffer)); }
+    catch (e) { return resolve({ error: `writeFile: ${e.message}` }); }
+
+    // -nt no timestamps, -nfa no flash-attn, -l en, -otxt write transcript to file, -of base path.
+    const args = [
+      '-m', WHISPER_MODEL,
+      '-f', wavPath,
+      '-otxt', '-of', tmpBase,
+      '-nt', '-nfa', '-l', 'en',
+      '-t', '4', // threads
+    ];
+    const child = spawn(WHISPER_CLI, args, { windowsHide: true });
+
+    let stderrBuf = '';
+    child.stderr.on('data', (d) => { stderrBuf += d.toString(); });
+    child.on('error', (e) => {
+      cleanup();
+      resolve({ error: `spawn ${e.code || ''}: ${e.message}` });
+    });
+    child.on('close', (code) => {
+      let text = '';
+      try { text = fs.readFileSync(txtPath, 'utf8').trim(); } catch {}
+      cleanup();
+      if (code !== 0 && !text) {
+        return resolve({ error: `whisper-cli exit ${code}: ${stderrBuf.slice(-200).trim()}` });
+      }
+      resolve({ text });
+    });
+
+    function cleanup() {
+      try { fs.unlinkSync(wavPath); } catch {}
+      try { fs.unlinkSync(txtPath); } catch {}
+    }
+  });
+}
+
+ipcMain.handle('whisper-transcribe', async (_e, { wavBuffer }) => {
   if (whisperBusy) return { error: 'busy: previous chunk still processing (dropped)' };
   whisperBusy = true;
   try {
-    return await postMultipart(url, wavBuffer);
+    return await runWhisperCli(wavBuffer);
   } finally {
     whisperBusy = false;
   }

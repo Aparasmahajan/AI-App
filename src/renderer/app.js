@@ -50,12 +50,109 @@ const els = {
   transcriptWrap: document.getElementById('transcript-wrap'),
   transcript: document.getElementById('transcript'),
   txClear: document.getElementById('tx-clear'),
+  mic: document.getElementById('mic'),
 };
 
+// ---------- Tap-to-record → whisper-cli → fill Ask input ----------
+// Independent of the Ctrl+Shift+L continuous-listening flow. Click mic to start
+// recording, click again to stop and transcribe. Result goes into the prompt.
+let micRecording = false;
+let micStream = null;
+let micCtx = null;
+let micProcessor = null;
+let micSource = null;
+let micSamples = new Float32Array(0);
+const MIC_SAMPLE_RATE = 16000;
+const MIC_MAX_SECONDS = 60; // safety cap
+els.mic.addEventListener('click', () => (micRecording ? stopMicRecording() : startMicRecording()));
+
+async function startMicRecording() {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    setStatus(`mic denied: ${e.message}`);
+    setTimeout(() => setStatus(''), 3000);
+    return;
+  }
+  micCtx = new AudioContext({ sampleRate: MIC_SAMPLE_RATE });
+  micSource = micCtx.createMediaStreamSource(micStream);
+  micProcessor = micCtx.createScriptProcessor(4096, 1, 1);
+  micSamples = new Float32Array(0);
+  micProcessor.onaudioprocess = (e) => {
+    const input = e.inputBuffer.getChannelData(0);
+    const merged = new Float32Array(micSamples.length + input.length);
+    merged.set(micSamples);
+    merged.set(input, micSamples.length);
+    micSamples = merged;
+    if (micSamples.length > MIC_SAMPLE_RATE * MIC_MAX_SECONDS) stopMicRecording();
+  };
+  micSource.connect(micProcessor);
+  micProcessor.connect(micCtx.destination);
+
+  micRecording = true;
+  els.mic.textContent = '■';
+  els.mic.classList.add('recording');
+  setStatus('recording', true);
+}
+
+async function stopMicRecording() {
+  if (!micRecording) return;
+  micRecording = false;
+  els.mic.classList.remove('recording');
+  els.mic.classList.add('transcribing');
+  els.mic.textContent = '…';
+  setStatus('transcribing', true);
+
+  try { micProcessor.disconnect(); } catch {}
+  try { micSource.disconnect(); } catch {}
+  try { micStream.getTracks().forEach((t) => t.stop()); } catch {}
+  try { micCtx.close(); } catch {}
+
+  const samples = micSamples;
+  micSamples = new Float32Array(0);
+  if (samples.length < MIC_SAMPLE_RATE * 0.3) {
+    setStatus('too short'); setTimeout(() => setStatus(''), 1500);
+    els.mic.classList.remove('transcribing');
+    els.mic.textContent = '🎙';
+    return;
+  }
+
+  const wav = encodeWAV(samples, MIC_SAMPLE_RATE);
+  const result = await window.api.transcribe(wav);
+  els.mic.classList.remove('transcribing');
+  els.mic.textContent = '🎙';
+
+  if (result.error) {
+    setStatus(`whisper: ${result.error}`);
+    setTimeout(() => setStatus(''), 4000);
+    return;
+  }
+  const text = (result.text || '').trim();
+  if (!text) { setStatus('no speech detected'); setTimeout(() => setStatus(''), 1500); return; }
+
+  // Append (with a space) if there's already text in the input, so user can dictate additions.
+  els.prompt.value = els.prompt.value ? `${els.prompt.value} ${text}` : text;
+  els.prompt.focus();
+  setStatus('done'); setTimeout(() => setStatus(''), 1000);
+}
+
 els.txClear.addEventListener('click', () => {
+  transcriptEntries = [];
   transcriptBuffer = '';
   els.transcript.textContent = '';
+  // Also collapse the strip and shrink the window back — empty transcript = no reason to keep space.
+  showTranscript(false);
 });
+
+// Show/hide transcript AND grow/shrink the OS window so it doesn't steal from answer.
+const TRANSCRIPT_HEIGHT_DELTA = 118; // strip height + border
+let transcriptShown = false;
+function showTranscript(show) {
+  if (show === transcriptShown) return;
+  transcriptShown = show;
+  els.transcriptWrap.hidden = !show;
+  window.api.growWindow(show ? TRANSCRIPT_HEIGHT_DELTA : -TRANSCRIPT_HEIGHT_DELTA);
+}
 
 // Manual resize — main-process cursor polling does the actual work; we just tell
 // it when to start and stop. This keeps working when the cursor is dragged
@@ -69,7 +166,49 @@ window.addEventListener('mouseup', () => window.api.endResize());
 // Safety: also end if the pointer leaves the window entirely.
 window.addEventListener('blur', () => window.api.endResize());
 
-let transcriptBuffer = '';  // kept in memory for LLM context; not shown
+// Transcript entries with timestamps so we can auto-expire old ones.
+const TRANSCRIPT_TTL_MS = 60000; // 60 s
+let transcriptEntries = []; // [{ text, ts }]
+let transcriptBuffer = '';  // rolling derived view of non-expired text (used as LLM context)
+function pruneTranscript() {
+  const cutoff = Date.now() - TRANSCRIPT_TTL_MS;
+  const before = transcriptEntries.length;
+  transcriptEntries = transcriptEntries.filter((e) => e.ts >= cutoff);
+  if (transcriptEntries.length !== before) rebuildTranscriptView();
+}
+function rebuildTranscriptView() {
+  transcriptBuffer = transcriptEntries.map((e) => e.text).join(' ').trim();
+  // Render each entry as a row with copy / → Ask actions on hover.
+  const html = transcriptEntries.map((e, i) => {
+    const safe = escapeHtml(e.text);
+    return `<div class="tx-line" data-i="${i}">
+      <span class="tx-text">${safe}</span>
+      <span class="tx-actions">
+        <button class="tx-btn" data-act="copy" data-i="${i}">copy</button>
+        <button class="tx-btn" data-act="toask" data-i="${i}">→ Ask</button>
+      </span>
+    </div>`;
+  }).join('');
+  els.transcript.innerHTML = html;
+  els.transcript.scrollTop = els.transcript.scrollHeight;
+  els.transcript.querySelectorAll('.tx-btn').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const i = parseInt(btn.dataset.i, 10);
+      const entry = transcriptEntries[i];
+      if (!entry) return;
+      if (btn.dataset.act === 'copy') {
+        navigator.clipboard.writeText(entry.text);
+        setStatus('copied'); setTimeout(() => setStatus(''), 800);
+      } else if (btn.dataset.act === 'toask') {
+        els.prompt.value = els.prompt.value ? `${els.prompt.value} ${entry.text}` : entry.text;
+        els.prompt.focus();
+      }
+    });
+  });
+}
+setInterval(pruneTranscript, 3000);
+
 let listening = false;
 let audioCtx = null;
 let sourceNodes = [];
@@ -173,7 +312,7 @@ els.gear.addEventListener('click', () => {
 els.cfgRefresh.addEventListener('click', populateModels);
 els.cfgTest.addEventListener('click', async () => {
   els.cfgTest.textContent = '...';
-  const r = await window.api.testWhisper(els.cfgWhisper.value.trim() || cfg.whisperUrl);
+  const r = await window.api.testWhisper();
   els.cfgTest.textContent = 'test';
   if (r.ok) setStatus(`whisper ok (HTTP ${r.status})`, true);
   else setStatus(`whisper: ${r.error}`, false);
@@ -666,7 +805,7 @@ async function startListening() {
     transcribeErrorShown = false;
     els.listen.textContent = 'listening';
     els.listen.className = 'pill on';
-    els.transcriptWrap.hidden = false;
+    showTranscript(true);
   } catch (e) {
     renderAnswer(`**Audio error:** ${e.message}`);
     listening = false;
@@ -677,6 +816,7 @@ function stopListening() {
   listening = false;
   els.listen.textContent = 'idle';
   els.listen.className = 'pill dim';
+  showTranscript(false);
   if (processorNode) { try { processorNode.disconnect(); } catch {} processorNode = null; }
   for (const s of sourceNodes) {
     try { s.node.disconnect(); } catch {}
@@ -723,7 +863,7 @@ function encodeWAV(samples, sampleRate) {
 }
 
 async function transcribeChunk(wavArrayBuffer) {
-  const result = await window.api.transcribe(cfg.whisperUrl, wavArrayBuffer);
+  const result = await window.api.transcribe(wavArrayBuffer);
   if (result.error) {
     console.warn(`[whisper] ERROR: ${result.error}`);
   } else {
@@ -752,7 +892,8 @@ async function transcribeChunk(wavArrayBuffer) {
   const cleaned = overlap ? text.slice(overlap) : text;
   if (!cleaned.trim()) return;
 
-  transcriptBuffer += ' ' + cleaned;
-  els.transcript.textContent = transcriptBuffer.slice(-2000);
-  els.transcript.scrollTop = els.transcript.scrollHeight;
+  transcriptEntries.push({ text: cleaned, ts: Date.now() });
+  // If the user cleared the strip earlier but is still listening, re-show it as new text arrives.
+  if (listening && !transcriptShown) showTranscript(true);
+  rebuildTranscriptView();
 }

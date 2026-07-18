@@ -398,9 +398,32 @@ body:not(.layout-bubbles) .bubble-pair { display: none; }
 #send.stop { background: #d94a4a; }
 #send.stop:hover { background: #c53a3a; }
 
-/* Transcript strip below the input row */
+#mic {
+  background: rgba(255,255,255,0.06);
+  color: #ccc;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1;
+}
+#mic:hover { background: rgba(255,255,255,0.12); }
+#mic.recording {
+  background: #d94a4a;
+  color: white;
+  border-color: #d94a4a;
+  animation: pulse 1s infinite;
+}
+#mic.transcribing {
+  background: rgba(255,180,80,0.25);
+  color: #ffc580;
+  border-color: rgba(255,180,80,0.5);
+}
+
+/* Transcript strip below the input row. flex-shrink: 0 so it never steals from answer. */
 #transcript-wrap {
-  max-height: 110px;
+  flex-shrink: 0;
+  height: 110px;
   border-top: 1px solid rgba(255,255,255,0.06);
   padding: 6px 12px 8px;
   overflow-y: auto;
@@ -429,7 +452,38 @@ body:not(.layout-bubbles) .bubble-pair { display: none; }
   padding: 0;
 }
 #tx-clear:hover { color: #ccc; }
-#transcript { color: #b8b8b8; font-size: 0.85em; white-space: pre-wrap; line-height: 1.4; }
+#transcript { color: #b8b8b8; font-size: 0.85em; line-height: 1.4; user-select: text; -webkit-user-select: text; }
+
+.tx-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  position: relative;
+}
+.tx-line:hover { background: rgba(255,255,255,0.05); }
+.tx-text { flex: 1; user-select: text; -webkit-user-select: text; }
+.tx-actions {
+  display: flex;
+  gap: 3px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+}
+.tx-line:hover .tx-actions { opacity: 1; }
+.tx-btn {
+  background: rgba(255,255,255,0.08);
+  color: #ccc;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  line-height: 1.4;
+}
+.tx-btn:hover { background: rgba(74,140,255,0.25); color: #7ab0ff; border-color: rgba(74,140,255,0.5); }
 
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
