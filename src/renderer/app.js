@@ -6,9 +6,12 @@ const DEFAULTS = {
   ollamaUrl: 'http://127.0.0.1:11434',
   whisperUrl: 'http://127.0.0.1:9000/inference',
   model: 'llama3.2:3b',
-  systemPrompt: 'You are a concise study/teaching assistant. Give a direct, correct answer. Also be ware to give a crisp an dconsise answer along with summary at last',
+  systemPrompt: 'You are a concise study/teaching assistant master of JAVA, SQL, DSA, System Design and Kafka. Give a direct, correct and human like answer not bookish one. Also be ware to give a crisp a consise answer along with summary at last. For coding question add an understandable comments too where ever required.',
   fontScale: 1,
   appOpacity: 0.82,
+  maxTokens: 400,     // cap on answer length; smaller = faster on CPU
+  contextChars: 1200, // per section (transcript, screen); smaller = faster
+  layout: 'cards',    // 'cards' | 'bubbles'
 };
 
 const OCR_MAX_WIDTH = 1280;
@@ -24,6 +27,7 @@ const els = {
   historyHeader: document.getElementById('history-header'),
   historyCount: document.getElementById('history-count'),
   clearAll: document.getElementById('clear-all'),
+  search: document.getElementById('search'),
   prompt: document.getElementById('prompt'),
   send: document.getElementById('send'),
   mode: document.getElementById('mode'),
@@ -40,6 +44,9 @@ const els = {
   cfgSave: document.getElementById('cfg-save'),
   cfgReset: document.getElementById('cfg-reset'),
   cfgTest: document.getElementById('cfg-test'),
+  cfgTokens: document.getElementById('cfg-tokens'),
+  cfgCtx: document.getElementById('cfg-ctx'),
+  cfgLayout: document.getElementById('cfg-layout'),
   transcriptWrap: document.getElementById('transcript-wrap'),
   transcript: document.getElementById('transcript'),
   txClear: document.getElementById('tx-clear'),
@@ -91,6 +98,24 @@ function applyVisualConfig() {
 }
 applyVisualConfig();
 
+// Warm up the model so the first real question doesn't pay the 10-30s cold-load cost.
+async function warmModel() {
+  try {
+    await fetch(`${cfg.ollamaUrl.replace(/\/$/, '')}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: cfg.model,
+        prompt: 'hi',
+        stream: false,
+        keep_alive: '30m',
+        options: { num_predict: 1 },
+      }),
+    });
+  } catch (e) { console.warn('model warmup failed:', e.message); }
+}
+warmModel();
+
 // ---------- Status ----------
 function setStatus(text, on = false) {
   els.status.textContent = text || '';
@@ -136,6 +161,7 @@ function toggleCollapse() {
   collapsed = !collapsed;
   els.app.classList.toggle('collapsed', collapsed);
   els.collapse.textContent = collapsed ? '+' : '–';
+  window.api.setCollapsed(collapsed);
 }
 
 // ---------- Settings panel ----------
@@ -159,11 +185,15 @@ els.cfgSave.addEventListener('click', () => {
     whisperUrl: els.cfgWhisper.value.trim() || DEFAULTS.whisperUrl,
     model: els.cfgModel.value || DEFAULTS.model,
     systemPrompt: els.cfgSystem.value.trim() || DEFAULTS.systemPrompt,
+    maxTokens: parseInt(els.cfgTokens.value, 10) || DEFAULTS.maxTokens,
+    contextChars: parseInt(els.cfgCtx.value, 10) || DEFAULTS.contextChars,
+    layout: els.cfgLayout.value || DEFAULTS.layout,
   });
   transcribeErrorShown = false; // re-arm the whisper warning for new URL
   setStatus('saved');
   setTimeout(() => setStatus(''), 1200);
   els.settings.hidden = true;
+  warmModel(); // pre-load the (possibly new) model
 });
 els.cfgReset.addEventListener('click', () => {
   saveConfig({ ...DEFAULTS });
@@ -177,8 +207,20 @@ function hydrateSettings() {
   els.cfgOllama.value = cfg.ollamaUrl;
   els.cfgWhisper.value = cfg.whisperUrl;
   els.cfgSystem.value = cfg.systemPrompt;
+  els.cfgTokens.value = String(cfg.maxTokens);
+  els.cfgCtx.value = String(cfg.contextChars);
+  els.cfgLayout.value = cfg.layout;
   populateModels();
 }
+
+// Live layout switch — re-renders instantly, no need to Save.
+els.cfgLayout && els.cfgLayout.addEventListener('change', () => {
+  saveConfig({ layout: els.cfgLayout.value });
+  document.body.classList.toggle('layout-bubbles', cfg.layout === 'bubbles');
+  renderHistory();
+});
+// Apply layout class on load
+document.body.classList.toggle('layout-bubbles', cfg.layout === 'bubbles');
 async function populateModels() {
   els.cfgModel.innerHTML = '<option>loading...</option>';
   const list = await window.api.listOllamaModels();
@@ -205,15 +247,27 @@ function cancelAll() {
 // ---------- LLM ----------
 async function askOllama(userPrompt, extraContext, onToken, signal) {
   const ctxParts = [
-    transcriptBuffer && `# Recent conversation transcript\n${transcriptBuffer.slice(-2000)}`,
-    extraContext && `# On-screen text\n${extraContext.slice(-2000)}`,
+    transcriptBuffer && `# Recent conversation transcript\n${transcriptBuffer.slice(-cfg.contextChars)}`,
+    extraContext && `# On-screen text\n${extraContext.slice(-cfg.contextChars)}`,
   ].filter(Boolean).join('\n\n');
   const fullPrompt = `${cfg.systemPrompt}\n\n${ctxParts}\n\n# Question\n${userPrompt}\n\n# Answer`;
 
   const res = await fetch(`${cfg.ollamaUrl.replace(/\/$/, '')}/api/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: cfg.model, prompt: fullPrompt, stream: true }),
+    body: JSON.stringify({
+      model: cfg.model,
+      prompt: fullPrompt,
+      stream: true,
+      keep_alive: '30m', // keep the model resident so subsequent calls skip disk load
+      options: {
+        num_predict: cfg.maxTokens,  // cap answer length (biggest speedup on CPU)
+        num_ctx: 2048,               // context window; larger uses more RAM/CPU
+        temperature: 0.3,
+        top_k: 40,
+        top_p: 0.9,
+      },
+    }),
     signal,
   });
   if (!res.ok) throw new Error(`Ollama HTTP ${res.status} — is 'ollama serve' running and '${cfg.model}' pulled?`);
@@ -254,24 +308,117 @@ function formatTime(ts) {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+// Search state. Format: optional prefix `typed:` / `screen:` / `heard:` + keywords.
+let searchQuery = '';
+let searchSource = null;  // null | 'typed' | 'screen' | 'heard'
+let searchKeywords = '';  // remainder after source filter
+
+function parseSearch(raw) {
+  const q = (raw || '').trim().toLowerCase();
+  // `typed:foo` or `typed foo` → source filter + keyword
+  const m = q.match(/^(typed|screen|heard)[:\s]+(.*)$/);
+  if (m) return { source: m[1], keywords: m[2] };
+  // Bare `typed` / `screen` / `heard` → source filter only
+  if (['typed', 'screen', 'heard'].includes(q)) return { source: q, keywords: '' };
+  return { source: null, keywords: q };
+}
+
+function entryMatchesSearch(entry) {
+  if (searchSource && entry.source !== searchSource) return false;
+  if (!searchKeywords) return true;
+  const hay = ((entry.question || '') + ' ' + (entry.answer || '')).toLowerCase();
+  return hay.includes(searchKeywords);
+}
+
+function highlight(text, needle) {
+  if (!needle) return escapeHtml(text);
+  const escaped = escapeHtml(text);
+  const re = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  return escaped.replace(re, (m) => `<mark>${m}</mark>`);
+}
+
+// Chat-bubble layout (option A): question on the right, answer on the left.
+function renderBubble(entry) {
+  const label = { typed: 'TYPED', screen: 'SCREEN', heard: 'HEARD' }[entry.source] || entry.source.toUpperCase();
+  const hidden = !entryMatchesSearch(entry) ? ' hidden-by-search' : '';
+  const questionHtml = highlight(entry.question || '', searchKeywords);
+  const answerHtml = entry.error
+    ? `<span style="color:#ff7070">Error: ${escapeHtml(entry.error)}</span>`
+    : renderMarkdownWithHighlight(entry.answer || (entry.streaming ? '…' : ''), searchKeywords);
+  return `
+    <div class="bubble-pair${hidden}" data-id="${entry.id}">
+      <div class="bubble bubble-q source-${entry.source}">
+        <div class="bubble-head">
+          <span class="badge badge-${entry.source}">${label}</span>
+          <span class="ts">${formatTime(entry.timestamp)}</span>
+        </div>
+        <div>${questionHtml}</div>
+      </div>
+      <div class="bubble bubble-a${entry.streaming ? ' streaming' : ''}${entry.error ? ' error' : ''}">
+        <div>${answerHtml}</div>
+        <div class="bubble-actions">
+          <button class="card-btn copy" data-action="copy" data-id="${entry.id}">copy</button>
+          <button class="card-btn del" data-action="delete" data-id="${entry.id}">×</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 // To switch to bubble-style (option A), replace this function.
 function renderCard(entry) {
   const label = { typed: 'TYPED', screen: 'SCREEN', heard: 'HEARD' }[entry.source] || entry.source.toUpperCase();
+  const hidden = !entryMatchesSearch(entry) ? ' hidden-by-search' : '';
+  const questionHtml = highlight(entry.question || '', searchKeywords);
+  const answerRaw = entry.error
+    ? null
+    : (entry.answer || (entry.streaming ? '…' : ''));
   const answerHtml = entry.error
     ? `<span style="color:#ff7070">Error: ${escapeHtml(entry.error)}</span>`
-    : renderMarkdown(entry.answer || (entry.streaming ? '…' : ''));
+    : renderMarkdownWithHighlight(answerRaw, searchKeywords);
   return `
-    <article class="card${entry.streaming ? ' streaming' : ''}${entry.error ? ' error' : ''}" data-id="${entry.id}">
+    <article class="card${entry.streaming ? ' streaming' : ''}${entry.error ? ' error' : ''}${hidden}" data-id="${entry.id}">
       <div class="card-head">
         <span class="badge badge-${entry.source}">${label}</span>
         <span class="ts">${formatTime(entry.timestamp)}</span>
         <button class="card-btn copy" data-action="copy" data-id="${entry.id}">copy</button>
         <button class="card-btn del" data-action="delete" data-id="${entry.id}">×</button>
       </div>
-      <div class="card-q">${escapeHtml(entry.question || '')}</div>
+      <div class="card-q">${questionHtml}</div>
       <div class="card-a">${answerHtml}</div>
     </article>
   `;
+}
+
+// Render markdown, then walk text nodes to wrap matches in <mark> tags.
+// Doing it via DOM traversal avoids injecting marks inside tags or code blocks.
+function renderMarkdownWithHighlight(text, needle) {
+  const html = renderMarkdown(text);
+  if (!needle) return html;
+  const container = document.createElement('div');
+  container.innerHTML = html;
+  const re = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const targets = [];
+  let n;
+  while ((n = walker.nextNode())) targets.push(n);
+  for (const node of targets) {
+    re.lastIndex = 0;
+    if (!re.test(node.nodeValue)) continue;
+    re.lastIndex = 0;
+    const frag = document.createDocumentFragment();
+    let last = 0, m;
+    while ((m = re.exec(node.nodeValue))) {
+      if (m.index > last) frag.appendChild(document.createTextNode(node.nodeValue.slice(last, m.index)));
+      const mark = document.createElement('mark');
+      mark.textContent = m[0];
+      frag.appendChild(mark);
+      last = re.lastIndex;
+    }
+    if (last < node.nodeValue.length) frag.appendChild(document.createTextNode(node.nodeValue.slice(last)));
+    node.parentNode.replaceChild(frag, node);
+  }
+  return container.innerHTML;
 }
 
 function renderHistory() {
@@ -282,8 +429,9 @@ function renderHistory() {
     return;
   }
   els.answerBody.classList.remove('placeholder');
-  els.answerBody.innerHTML = history.map(renderCard).join('');
-  els.historyCount.textContent = history.length;
+  const renderer = cfg.layout === 'bubbles' ? renderBubble : renderCard;
+  els.answerBody.innerHTML = history.map(renderer).join('');
+  updateHistoryCount();
   els.historyHeader.hidden = false;
 
   // Re-bind per-card action buttons (innerHTML wipes listeners each render)
@@ -328,6 +476,47 @@ function deleteEntry(id) {
   renderHistory();
 }
 els.clearAll.addEventListener('click', () => { history = []; currentEntryId = null; renderHistory(); });
+
+// Chip filter (source only). When a chip is active, that overrides the search text's source prefix.
+let chipSource = ''; // '' | 'typed' | 'screen' | 'heard'
+document.querySelectorAll('#source-chips .chip').forEach((chip) => {
+  chip.addEventListener('click', () => {
+    document.querySelectorAll('#source-chips .chip').forEach((c) => c.classList.remove('active'));
+    chip.classList.add('active');
+    chipSource = chip.dataset.source;
+    applySearch();
+  });
+});
+
+function applySearch() {
+  const parsed = parseSearch(searchQuery);
+  searchSource = chipSource || parsed.source;
+  searchKeywords = parsed.keywords;
+  renderHistory();
+}
+
+// Search — filter cards by keyword. Source filter comes from chip or `typed:` prefix.
+els.search.addEventListener('input', () => {
+  searchQuery = els.search.value;
+  applySearch();
+});
+els.search.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { els.search.value = ''; els.search.dispatchEvent(new Event('input')); els.search.blur(); }
+});
+// Ctrl+F focuses the search box (like Chrome). Local-only shortcut so we can
+// listen in the renderer without a global-shortcut round-trip.
+window.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+    e.preventDefault();
+    els.search.focus();
+    els.search.select();
+  }
+});
+
+function updateHistoryCount() {
+  const visible = history.filter(entryMatchesSearch).length;
+  els.historyCount.textContent = (searchQuery ? `${visible}/${history.length}` : history.length);
+}
 
 // Auto-scroll
 let userScrolledUp = false;
@@ -505,7 +694,12 @@ function rms(samples) {
 }
 
 async function dispatchChunk(samples) {
-  if (rms(samples) < VAD_RMS_THRESHOLD) return;
+  const level = rms(samples);
+  if (level < VAD_RMS_THRESHOLD) {
+    console.log(`[audio] chunk dropped (silence) rms=${level.toFixed(4)}`);
+    return;
+  }
+  console.log(`[audio] chunk sent rms=${level.toFixed(4)} samples=${samples.length}`);
   const wav = encodeWAV(samples, WHISPER_SAMPLE_RATE);
   transcribeChunk(wav);
 }
@@ -531,11 +725,16 @@ function encodeWAV(samples, sampleRate) {
 async function transcribeChunk(wavArrayBuffer) {
   const result = await window.api.transcribe(cfg.whisperUrl, wavArrayBuffer);
   if (result.error) {
-    // Show the error once via the status pill instead of spamming a transcript panel.
+    console.warn(`[whisper] ERROR: ${result.error}`);
+  } else {
+    console.log(`[whisper] OK: "${(result.text || '').slice(0, 80)}"`);
+  }
+  if (result.error) {
+    // "busy" is expected under CPU load — don't pester the user about it.
+    if (result.error.startsWith('busy')) return;
     if (!transcribeErrorShown) {
       transcribeErrorShown = true;
       setStatus(`whisper: ${result.error}`, false);
-      console.warn('whisper transcription error:', result.error);
       setTimeout(() => setStatus(''), 5000);
     }
     return;

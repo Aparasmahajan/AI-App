@@ -31,6 +31,35 @@
         </div>
         <div class="settings-row two-col">
           <div>
+            <label>Response length</label>
+            <select id="cfg-tokens">
+              <option value="150">Short (~150 tokens, fastest)</option>
+              <option value="400">Medium (~400 tokens)</option>
+              <option value="800">Long (~800 tokens)</option>
+              <option value="1500">Very long (slow on CPU)</option>
+            </select>
+          </div>
+          <div>
+            <label>Context per section</label>
+            <select id="cfg-ctx">
+              <option value="600">Minimal (600 chars)</option>
+              <option value="1200">Balanced (1200 chars)</option>
+              <option value="2000">Rich (2000 chars, slower)</option>
+            </select>
+          </div>
+        </div>
+        <div class="settings-row two-col">
+          <div>
+            <label>Layout</label>
+            <select id="cfg-layout">
+              <option value="cards">Cards (compact log)</option>
+              <option value="bubbles">Bubbles (chat-style)</option>
+            </select>
+          </div>
+          <div></div>
+        </div>
+        <div class="settings-row two-col">
+          <div>
             <label>Ollama URL</label>
             <input id="cfg-ollama" type="text" />
           </div>
@@ -48,8 +77,15 @@
       <main id="body">
         <section id="answer">
           <div id="history-header" hidden>
-            <span><span id="history-count">0</span> entries</span>
-            <button id="clear-all">clear all</button>
+            <div id="source-chips">
+              <button class="chip active" data-source="">all</button>
+              <button class="chip" data-source="typed">typed</button>
+              <button class="chip" data-source="screen">screen</button>
+              <button class="chip" data-source="heard">heard</button>
+            </div>
+            <input id="search" type="text" placeholder="Search text…" />
+            <span id="history-count-wrap"><span id="history-count">0</span></span>
+            <button id="clear-all">clear</button>
           </div>
           <div id="answer-body" class="placeholder">
             <b>Ctrl+Shift+H</b> hide/show &nbsp; <b>Ctrl+Shift+I</b> interact &nbsp; <b>Ctrl+Shift+K</b> collapse<br/>
