@@ -4,7 +4,6 @@ const path = require('path');
 const WIN_W = 900;
 const WIN_H = 340;
 const BAR_HEIGHT = 46;         // top zone that becomes interactive on hover (bar + 6 px gutter)
-const EDGE_ZONE = 8;           // outer band where resize cursors need to be reachable
 const CURSOR_POLL_MS = 33;     // ~30 Hz — smooth enough for drag, cheap
 
 let overlay = null;
@@ -23,9 +22,7 @@ function createOverlay() {
     frame: false,
     transparent: true,
     alwaysOnTop: true,
-    resizable: true,
-    minWidth: 500,
-    minHeight: 160,
+    resizable: false,   // OS resize cursors would appear at edges otherwise
     skipTaskbar: true,
     focusable: true,
     hasShadow: false,
@@ -60,24 +57,32 @@ function startCursorPoll() {
   stopCursorPoll();
   cursorPollTimer = setInterval(() => {
     if (!overlay || overlay.isDestroyed() || !overlay.isVisible()) return;
-    if (!userClickThrough) return; // user forced interactive mode via hotkey
+
+    // Active resize: adjust window bounds based on cursor delta since drag start.
+    if (resizeState) {
+      const c = screen.getCursorScreenPoint();
+      const dx = c.x - resizeState.startX;
+      const dy = c.y - resizeState.startY;
+      overlay.setBounds({
+        x: resizeState.winX,
+        y: resizeState.winY,
+        width: Math.max(500, resizeState.startW + dx),
+        height: Math.max(160, resizeState.startH + dy),
+      });
+      return; // don't touch passthrough while resizing
+    }
+
+    if (!userClickThrough) return;
 
     const b = overlay.getBounds();
     const c = screen.getCursorScreenPoint();
     const insideWin = c.x >= b.x && c.x <= b.x + b.width && c.y >= b.y && c.y <= b.y + b.height;
     if (!insideWin) { setPassthrough(true); return; }
 
-    const relX = c.x - b.x;
     const relY = c.y - b.y;
     const overTopBar = relY < BAR_HEIGHT;
-    // Bottom zone covers input row (~44 px) + transcript strip (~110 px when visible).
-    // Being generous here is safe — user is only hovering, they haven't clicked anything.
     const overBottom = relY > b.height - 166;
-    // Outer edge band — required so Windows can render + trigger resize cursors.
-    const overEdge = relX < EDGE_ZONE || relX > b.width - EDGE_ZONE ||
-                     relY < EDGE_ZONE || relY > b.height - EDGE_ZONE;
-
-    setPassthrough(!(overTopBar || overBottom || overEdge));
+    setPassthrough(!(overTopBar || overBottom));
   }, CURSOR_POLL_MS);
 }
 function stopCursorPoll() {
@@ -133,7 +138,7 @@ function registerHotkeys() {
   tryRegister('CommandOrControl+Shift+]', () => overlay?.webContents.send('opacity-delta', +0.05));
   tryRegister('CommandOrControl+Shift+[', () => overlay?.webContents.send('opacity-delta', -0.05));
 
-  tryRegister('CommandOrControl+Shift+C', () => {
+  tryRegister('CommandOrControl+Alt+C', () => {
     if (!overlay) return;
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
     const [w, h] = overlay.getSize();
@@ -146,6 +151,17 @@ function registerHotkeys() {
 ipcMain.on('set-window-opacity', (_e, value) => {
   overlay?.setOpacity(Math.max(0.2, Math.min(1.0, value)));
 });
+
+// Manual resize driven entirely from main using OS cursor position — reliable
+// even when the cursor is dragged outside the window bounds.
+let resizeState = null;
+ipcMain.on('start-resize', () => {
+  if (!overlay) return;
+  const c = screen.getCursorScreenPoint();
+  const b = overlay.getBounds();
+  resizeState = { startX: c.x, startY: c.y, startW: b.width, startH: b.height, winX: b.x, winY: b.y };
+});
+ipcMain.on('end-resize', () => { resizeState = null; });
 
 ipcMain.handle('capture-screen', async () => {
   const sources = await desktopCapturer.getSources({

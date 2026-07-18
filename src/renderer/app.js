@@ -47,6 +47,18 @@ els.txClear.addEventListener('click', () => {
   els.transcript.textContent = '';
 });
 
+// Manual resize — main-process cursor polling does the actual work; we just tell
+// it when to start and stop. This keeps working when the cursor is dragged
+// outside the window bounds (which stops renderer mousemove events).
+const resizeGrip = document.getElementById('resize-grip');
+resizeGrip.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  window.api.startResize();
+});
+window.addEventListener('mouseup', () => window.api.endResize());
+// Safety: also end if the pointer leaves the window entirely.
+window.addEventListener('blur', () => window.api.endResize());
+
 let transcriptBuffer = '';  // kept in memory for LLM context; not shown
 let listening = false;
 let audioCtx = null;

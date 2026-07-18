@@ -20,6 +20,7 @@ html, body {
 body { padding: 6px; }
 
 #app {
+  position: relative;
   height: calc(100vh - 12px);
   display: flex;
   flex-direction: column;
@@ -203,3 +204,17 @@ body { padding: 6px; }
 
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+
+/* Manual resize grip — bottom-right corner. No cursor change (default arrow). */
+#resize-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  background:
+    linear-gradient(135deg, transparent 55%, rgba(255,255,255,0.25) 55%, rgba(255,255,255,0.25) 62%, transparent 62%,
+                             transparent 72%, rgba(255,255,255,0.25) 72%, rgba(255,255,255,0.25) 79%, transparent 79%,
+                             transparent 89%, rgba(255,255,255,0.25) 89%, rgba(255,255,255,0.25) 96%, transparent 96%);
+  z-index: 10;
+}

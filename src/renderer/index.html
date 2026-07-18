@@ -13,8 +13,8 @@
         <span id="mode" class="pill dim">click-through</span>
         <span id="listen" class="pill dim">idle</span>
         <span id="status" class="pill dim"></span>
-        <button id="collapse" title="Collapse (Ctrl+Shift+K)">–</button>
-        <button id="gear" title="Settings">⚙</button>
+        <button id="collapse">–</button>
+        <button id="gear">⚙</button>
       </header>
 
       <section id="settings" hidden>
@@ -22,7 +22,7 @@
           <label>Model</label>
           <div style="display:flex; gap:6px;">
             <select id="cfg-model"></select>
-            <button id="cfg-refresh" title="Refresh model list">↻</button>
+            <button id="cfg-refresh">↻</button>
           </div>
         </div>
         <div class="settings-row">
@@ -35,7 +35,7 @@
             <input id="cfg-ollama" type="text" />
           </div>
           <div>
-            <label>Whisper URL &nbsp; <button id="cfg-test" type="button" title="Test connection">test</button></label>
+            <label>Whisper URL &nbsp; <button id="cfg-test" type="button">test</button></label>
             <input id="cfg-whisper" type="text" />
           </div>
         </div>
@@ -50,8 +50,8 @@
           <div id="answer-body" class="placeholder">
             <b>Ctrl+Shift+H</b> hide/show &nbsp; <b>Ctrl+Shift+I</b> interact &nbsp; <b>Ctrl+Shift+K</b> collapse<br/>
             <b>Ctrl+Shift+A</b> ask screen &nbsp; <b>Ctrl+Shift+L</b> listen &nbsp; <b>Ctrl+Shift+X</b> stop<br/>
-            <b>Ctrl+=</b>/<b>-</b> font &nbsp; <b>Ctrl+Shift+]</b>/<b>[</b> opacity &nbsp; <b>Ctrl+Shift+C</b> recenter<br/><br/>
-            Drag by the title bar (works in click-through). Click ⚙ for model + system prompt.
+            <b>Ctrl+=</b>/<b>-</b> font &nbsp; <b>Ctrl+Shift+]</b>/<b>[</b> opacity &nbsp; <b>Ctrl+Alt+C</b> recenter<br/><br/>
+            Drag by the title bar. Drag the grip in the bottom-right corner to resize. Click ⚙ for settings.
           </div>
         </section>
       </main>
@@ -64,10 +64,12 @@
       <section id="transcript-wrap" hidden>
         <div class="tx-header">
           <span class="tx-label">Live transcript</span>
-          <button id="tx-clear" title="Clear transcript">clear</button>
+          <button id="tx-clear">clear</button>
         </div>
         <div id="transcript"></div>
       </section>
+
+      <div id="resize-grip"></div>
     </div>
 
     <script src="../../node_modules/tesseract.js/dist/tesseract.min.js"></script>
