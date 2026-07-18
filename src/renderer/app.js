@@ -166,8 +166,8 @@ window.addEventListener('mouseup', () => window.api.endResize());
 // Safety: also end if the pointer leaves the window entirely.
 window.addEventListener('blur', () => window.api.endResize());
 
-// Transcript entries with timestamps so we can auto-expire old ones (currently 15s).
-const TRANSCRIPT_TTL_MS = 15000;
+// Transcript entries with timestamps so we can auto-expire old ones.
+const TRANSCRIPT_TTL_MS = 60000; // 60 s
 let transcriptEntries = []; // [{ text, ts }]
 let transcriptBuffer = '';  // rolling derived view of non-expired text (used as LLM context)
 function pruneTranscript() {
@@ -178,8 +178,34 @@ function pruneTranscript() {
 }
 function rebuildTranscriptView() {
   transcriptBuffer = transcriptEntries.map((e) => e.text).join(' ').trim();
-  els.transcript.textContent = transcriptBuffer;
+  // Render each entry as a row with copy / → Ask actions on hover.
+  const html = transcriptEntries.map((e, i) => {
+    const safe = escapeHtml(e.text);
+    return `<div class="tx-line" data-i="${i}">
+      <span class="tx-text">${safe}</span>
+      <span class="tx-actions">
+        <button class="tx-btn" data-act="copy" data-i="${i}">copy</button>
+        <button class="tx-btn" data-act="toask" data-i="${i}">→ Ask</button>
+      </span>
+    </div>`;
+  }).join('');
+  els.transcript.innerHTML = html;
   els.transcript.scrollTop = els.transcript.scrollHeight;
+  els.transcript.querySelectorAll('.tx-btn').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const i = parseInt(btn.dataset.i, 10);
+      const entry = transcriptEntries[i];
+      if (!entry) return;
+      if (btn.dataset.act === 'copy') {
+        navigator.clipboard.writeText(entry.text);
+        setStatus('copied'); setTimeout(() => setStatus(''), 800);
+      } else if (btn.dataset.act === 'toask') {
+        els.prompt.value = els.prompt.value ? `${els.prompt.value} ${entry.text}` : entry.text;
+        els.prompt.focus();
+      }
+    });
+  });
 }
 setInterval(pruneTranscript, 3000);
 

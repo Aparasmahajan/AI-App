@@ -10,8 +10,8 @@ const { URL } = require('url');
 const WHISPER_CLI = path.join(__dirname, '..', 'addon', 'whisper-blas-bin-x64', 'Release', 'whisper-cli.exe');
 const WHISPER_MODEL = path.join(__dirname, '..', 'addon', 'ggml-base.en.bin');
 
-const WIN_W = 900;
-const WIN_H = 425; // 25% taller than the previous 340
+const WIN_W = 900; 
+const WIN_H = 600; 
 const BAR_HEIGHT = 46;         // top zone that becomes interactive on hover (bar + 6 px gutter)
 const CURSOR_POLL_MS = 33;     // ~30 Hz — smooth enough for drag, cheap
 
