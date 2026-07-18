@@ -11,7 +11,7 @@ const WHISPER_CLI = path.join(__dirname, '..', 'addon', 'whisper-blas-bin-x64', 
 const WHISPER_MODEL = path.join(__dirname, '..', 'addon', 'ggml-base.en.bin');
 
 const WIN_W = 900;
-const WIN_H = 340;
+const WIN_H = 425; // 25% taller than the previous 340
 const BAR_HEIGHT = 46;         // top zone that becomes interactive on hover (bar + 6 px gutter)
 const CURSOR_POLL_MS = 33;     // ~30 Hz — smooth enough for drag, cheap
 
@@ -173,6 +173,14 @@ ipcMain.on('set-collapsed', (_e, collapsed) => {
     overlay.setBounds({ x: b.x, y: b.y, width: preCollapseSize.w, height: preCollapseSize.h });
     preCollapseSize = null;
   }
+});
+
+// Grow the window downward by `delta` px when the transcript appears; shrink
+// back when it hides. Answer area stays untouched.
+ipcMain.on('grow-window', (_e, delta) => {
+  if (!overlay) return;
+  const b = overlay.getBounds();
+  overlay.setBounds({ x: b.x, y: b.y, width: b.width, height: Math.max(160, b.height + delta) });
 });
 
 // Manual resize driven entirely from main using OS cursor position — reliable

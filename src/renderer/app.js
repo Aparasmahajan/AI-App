@@ -137,9 +137,22 @@ async function stopMicRecording() {
 }
 
 els.txClear.addEventListener('click', () => {
+  transcriptEntries = [];
   transcriptBuffer = '';
   els.transcript.textContent = '';
+  // Also collapse the strip and shrink the window back — empty transcript = no reason to keep space.
+  showTranscript(false);
 });
+
+// Show/hide transcript AND grow/shrink the OS window so it doesn't steal from answer.
+const TRANSCRIPT_HEIGHT_DELTA = 118; // strip height + border
+let transcriptShown = false;
+function showTranscript(show) {
+  if (show === transcriptShown) return;
+  transcriptShown = show;
+  els.transcriptWrap.hidden = !show;
+  window.api.growWindow(show ? TRANSCRIPT_HEIGHT_DELTA : -TRANSCRIPT_HEIGHT_DELTA);
+}
 
 // Manual resize — main-process cursor polling does the actual work; we just tell
 // it when to start and stop. This keeps working when the cursor is dragged
@@ -153,7 +166,23 @@ window.addEventListener('mouseup', () => window.api.endResize());
 // Safety: also end if the pointer leaves the window entirely.
 window.addEventListener('blur', () => window.api.endResize());
 
-let transcriptBuffer = '';  // kept in memory for LLM context; not shown
+// Transcript entries with timestamps so we can auto-expire old ones (currently 15s).
+const TRANSCRIPT_TTL_MS = 15000;
+let transcriptEntries = []; // [{ text, ts }]
+let transcriptBuffer = '';  // rolling derived view of non-expired text (used as LLM context)
+function pruneTranscript() {
+  const cutoff = Date.now() - TRANSCRIPT_TTL_MS;
+  const before = transcriptEntries.length;
+  transcriptEntries = transcriptEntries.filter((e) => e.ts >= cutoff);
+  if (transcriptEntries.length !== before) rebuildTranscriptView();
+}
+function rebuildTranscriptView() {
+  transcriptBuffer = transcriptEntries.map((e) => e.text).join(' ').trim();
+  els.transcript.textContent = transcriptBuffer;
+  els.transcript.scrollTop = els.transcript.scrollHeight;
+}
+setInterval(pruneTranscript, 3000);
+
 let listening = false;
 let audioCtx = null;
 let sourceNodes = [];
@@ -750,7 +779,7 @@ async function startListening() {
     transcribeErrorShown = false;
     els.listen.textContent = 'listening';
     els.listen.className = 'pill on';
-    els.transcriptWrap.hidden = false;
+    showTranscript(true);
   } catch (e) {
     renderAnswer(`**Audio error:** ${e.message}`);
     listening = false;
@@ -761,6 +790,7 @@ function stopListening() {
   listening = false;
   els.listen.textContent = 'idle';
   els.listen.className = 'pill dim';
+  showTranscript(false);
   if (processorNode) { try { processorNode.disconnect(); } catch {} processorNode = null; }
   for (const s of sourceNodes) {
     try { s.node.disconnect(); } catch {}
@@ -836,7 +866,8 @@ async function transcribeChunk(wavArrayBuffer) {
   const cleaned = overlap ? text.slice(overlap) : text;
   if (!cleaned.trim()) return;
 
-  transcriptBuffer += ' ' + cleaned;
-  els.transcript.textContent = transcriptBuffer.slice(-2000);
-  els.transcript.scrollTop = els.transcript.scrollHeight;
+  transcriptEntries.push({ text: cleaned, ts: Date.now() });
+  // If the user cleared the strip earlier but is still listening, re-show it as new text arrives.
+  if (listening && !transcriptShown) showTranscript(true);
+  rebuildTranscriptView();
 }

@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('api', {
   testWhisper: () => ipcRenderer.invoke('whisper-test'),
   setWindowOpacity: (v) => ipcRenderer.send('set-window-opacity', v),
   setCollapsed: (v) => ipcRenderer.send('set-collapsed', v),
+  growWindow: (delta) => ipcRenderer.send('grow-window', delta),
   startResize: () => ipcRenderer.send('start-resize'),
   endResize: () => ipcRenderer.send('end-resize'),
   onTriggerScreenAsk: (cb) => ipcRenderer.on('trigger-screen-ask', cb),
