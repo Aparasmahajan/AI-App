@@ -1,5 +1,7 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer, screen, session } = require('electron');
 const path = require('path');
+const http = require('http');
+const { URL } = require('url');
 
 const WIN_W = 900;
 const WIN_H = 340;
@@ -152,6 +154,20 @@ ipcMain.on('set-window-opacity', (_e, value) => {
   overlay?.setOpacity(Math.max(0.2, Math.min(1.0, value)));
 });
 
+// Collapse: shrink the OS window to bar-only. Expand: restore previous size.
+let preCollapseSize = null;
+ipcMain.on('set-collapsed', (_e, collapsed) => {
+  if (!overlay) return;
+  const b = overlay.getBounds();
+  if (collapsed) {
+    preCollapseSize = { w: b.width, h: b.height };
+    overlay.setBounds({ x: b.x, y: b.y, width: b.width, height: 58 }); // bar + 6+6 gutter
+  } else if (preCollapseSize) {
+    overlay.setBounds({ x: b.x, y: b.y, width: preCollapseSize.w, height: preCollapseSize.h });
+    preCollapseSize = null;
+  }
+});
+
 // Manual resize driven entirely from main using OS cursor position — reliable
 // even when the cursor is dragged outside the window bounds.
 let resizeState = null;
@@ -181,41 +197,93 @@ ipcMain.handle('list-ollama-models', async () => {
 });
 
 ipcMain.handle('whisper-test', async (_e, url) => {
-  try {
-    const res = await fetch(url.replace(/\/inference\/?$/, '/'), { method: 'GET' });
-    return { ok: true, status: res.status };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
+  // Real end-to-end test: send a 3s silent WAV via the same path real chunks use.
+  const sampleRate = 16000, samples = sampleRate * 3;
+  const buf = Buffer.alloc(44 + samples * 2);
+  buf.write('RIFF', 0);
+  buf.writeUInt32LE(36 + samples * 2, 4);
+  buf.write('WAVE', 8); buf.write('fmt ', 12);
+  buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20); buf.writeUInt16LE(1, 22);
+  buf.writeUInt32LE(sampleRate, 24); buf.writeUInt32LE(sampleRate * 2, 28);
+  buf.writeUInt16LE(2, 32); buf.writeUInt16LE(16, 34);
+  buf.write('data', 36); buf.writeUInt32LE(samples * 2, 40);
+  const r = await postMultipart(url, buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+  if (r.error) return { ok: false, error: r.error };
+  return { ok: true, status: 200 };
 });
 
-ipcMain.handle('whisper-transcribe', async (_e, { url, wavBuffer }) => {
-  try {
-    const boundary = '----ovBoundary' + Math.random().toString(36).slice(2);
-    const preamble = Buffer.from(
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="file"; filename="chunk.wav"\r\n` +
-      `Content-Type: audio/wav\r\n\r\n`
-    );
-    const middle = Buffer.from(
-      `\r\n--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="temperature"\r\n\r\n0` +
-      `\r\n--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="response_format"\r\n\r\njson`
-    );
-    const closing = Buffer.from(`\r\n--${boundary}--\r\n`);
-    const body = Buffer.concat([preamble, Buffer.from(wavBuffer), middle, closing]);
+// Build a multipart/form-data body as a single Buffer so we can send it with
+// an explicit Content-Length header (no chunked transfer encoding). cpp-httplib
+// (inside whisper-server.exe) chokes on Transfer-Encoding: chunked and resets
+// the connection — that was the root cause of the ECONNRESET errors.
+function buildMultipart(wavBuffer) {
+  const boundary = '----ovBoundary' + Math.random().toString(36).slice(2);
+  const CRLF = '\r\n';
+  const parts = [];
+  parts.push(Buffer.from(
+    `--${boundary}${CRLF}` +
+    `Content-Disposition: form-data; name="file"; filename="chunk.wav"${CRLF}` +
+    `Content-Type: audio/wav${CRLF}${CRLF}`
+  ));
+  parts.push(Buffer.from(wavBuffer));
+  parts.push(Buffer.from(
+    `${CRLF}--${boundary}${CRLF}` +
+    `Content-Disposition: form-data; name="temperature"${CRLF}${CRLF}0` +
+    `${CRLF}--${boundary}${CRLF}` +
+    `Content-Disposition: form-data; name="response_format"${CRLF}${CRLF}json` +
+    `${CRLF}--${boundary}--${CRLF}`
+  ));
+  return { body: Buffer.concat(parts), boundary };
+}
 
-    const res = await fetch(url, {
+// Post via node:http to guarantee Content-Length instead of chunked encoding.
+function postMultipart(url, wavBuffer) {
+  return new Promise((resolve) => {
+    let u;
+    try { u = new URL(url); } catch (e) { return resolve({ error: `bad URL: ${e.message}` }); }
+    const { body, boundary } = buildMultipart(wavBuffer);
+    const req = http.request({
+      hostname: u.hostname,
+      port: u.port || 80,
+      path: u.pathname + u.search,
       method: 'POST',
-      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
-      body,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length,
+        'Connection': 'close',
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return resolve({ error: `HTTP ${res.statusCode} — ${text.slice(0, 200)}` });
+        }
+        try {
+          const j = JSON.parse(text);
+          resolve({ text: (j.text || '').trim() });
+        } catch {
+          resolve({ text: text.trim() });
+        }
+      });
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const j = await res.json();
-    return { text: (j.text || '').trim() };
-  } catch (e) {
-    return { error: e.message };
+    req.on('error', (e) => resolve({ error: `${e.code || 'ERR'} ${e.message}` }));
+    req.write(body);
+    req.end();
+  });
+}
+
+// Serialize — whisper-server processes one chunk at a time; drop overlapping requests.
+let whisperBusy = false;
+
+ipcMain.handle('whisper-transcribe', async (_e, { url, wavBuffer }) => {
+  if (whisperBusy) return { error: 'busy: previous chunk still processing (dropped)' };
+  whisperBusy = true;
+  try {
+    return await postMultipart(url, wavBuffer);
+  } finally {
+    whisperBusy = false;
   }
 });
 

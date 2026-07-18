@@ -3,6 +3,7 @@ Open PowerShell:
 
 cd "C:\Users\parmahaj\Documents\New folder\AI App\addon\whisper-blas-bin-x64\Release"
 .\whisper-server.exe -m "C:\Users\parmahaj\Documents\New folder\AI App\addon\ggml-base.en.bin" --host 127.0.0.1 --port 9000
+.\whisper-server.exe -m "C:\Users\parmahaj\Documents\New folder\AI App\addon\ggml-base.en.bin" --host 127.0.0.1 --port 9000 -nfa
 Leave this running. You should see whisper server listening at http://127.0.0.1:9000. Test in another window with curl http://127.0.0.1:9000/ — anything other than "connection refused" means it's up.
 
 

@@ -6,11 +6,12 @@ const DEFAULTS = {
   ollamaUrl: 'http://127.0.0.1:11434',
   whisperUrl: 'http://127.0.0.1:9000/inference',
   model: 'llama3.2:3b',
-  systemPrompt: 'You are a concise study/teaching assistant master of JAVA, SQL, DSA, System Design and Kafka. Give a direct, correct answer. Also be ware to give a crisp a consise answer along with summary at last',
+  systemPrompt: 'You are a concise study/teaching assistant master of JAVA, SQL, DSA, System Design and Kafka. Give a direct, correct and human like answer not bookish one. Also be ware to give a crisp a consise answer along with summary at last. For coding question add an understandable comments too where ever required.',
   fontScale: 1,
   appOpacity: 0.82,
   maxTokens: 400,     // cap on answer length; smaller = faster on CPU
   contextChars: 1200, // per section (transcript, screen); smaller = faster
+  layout: 'cards',    // 'cards' | 'bubbles'
 };
 
 const OCR_MAX_WIDTH = 1280;
@@ -45,6 +46,7 @@ const els = {
   cfgTest: document.getElementById('cfg-test'),
   cfgTokens: document.getElementById('cfg-tokens'),
   cfgCtx: document.getElementById('cfg-ctx'),
+  cfgLayout: document.getElementById('cfg-layout'),
   transcriptWrap: document.getElementById('transcript-wrap'),
   transcript: document.getElementById('transcript'),
   txClear: document.getElementById('tx-clear'),
@@ -159,6 +161,7 @@ function toggleCollapse() {
   collapsed = !collapsed;
   els.app.classList.toggle('collapsed', collapsed);
   els.collapse.textContent = collapsed ? '+' : '–';
+  window.api.setCollapsed(collapsed);
 }
 
 // ---------- Settings panel ----------
@@ -184,6 +187,7 @@ els.cfgSave.addEventListener('click', () => {
     systemPrompt: els.cfgSystem.value.trim() || DEFAULTS.systemPrompt,
     maxTokens: parseInt(els.cfgTokens.value, 10) || DEFAULTS.maxTokens,
     contextChars: parseInt(els.cfgCtx.value, 10) || DEFAULTS.contextChars,
+    layout: els.cfgLayout.value || DEFAULTS.layout,
   });
   transcribeErrorShown = false; // re-arm the whisper warning for new URL
   setStatus('saved');
@@ -205,8 +209,18 @@ function hydrateSettings() {
   els.cfgSystem.value = cfg.systemPrompt;
   els.cfgTokens.value = String(cfg.maxTokens);
   els.cfgCtx.value = String(cfg.contextChars);
+  els.cfgLayout.value = cfg.layout;
   populateModels();
 }
+
+// Live layout switch — re-renders instantly, no need to Save.
+els.cfgLayout && els.cfgLayout.addEventListener('change', () => {
+  saveConfig({ layout: els.cfgLayout.value });
+  document.body.classList.toggle('layout-bubbles', cfg.layout === 'bubbles');
+  renderHistory();
+});
+// Apply layout class on load
+document.body.classList.toggle('layout-bubbles', cfg.layout === 'bubbles');
 async function populateModels() {
   els.cfgModel.innerHTML = '<option>loading...</option>';
   const list = await window.api.listOllamaModels();
@@ -301,8 +315,11 @@ let searchKeywords = '';  // remainder after source filter
 
 function parseSearch(raw) {
   const q = (raw || '').trim().toLowerCase();
-  const m = q.match(/^(typed|screen|heard):\s*(.*)$/);
+  // `typed:foo` or `typed foo` → source filter + keyword
+  const m = q.match(/^(typed|screen|heard)[:\s]+(.*)$/);
   if (m) return { source: m[1], keywords: m[2] };
+  // Bare `typed` / `screen` / `heard` → source filter only
+  if (['typed', 'screen', 'heard'].includes(q)) return { source: q, keywords: '' };
   return { source: null, keywords: q };
 }
 
@@ -318,6 +335,34 @@ function highlight(text, needle) {
   const escaped = escapeHtml(text);
   const re = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
   return escaped.replace(re, (m) => `<mark>${m}</mark>`);
+}
+
+// Chat-bubble layout (option A): question on the right, answer on the left.
+function renderBubble(entry) {
+  const label = { typed: 'TYPED', screen: 'SCREEN', heard: 'HEARD' }[entry.source] || entry.source.toUpperCase();
+  const hidden = !entryMatchesSearch(entry) ? ' hidden-by-search' : '';
+  const questionHtml = highlight(entry.question || '', searchKeywords);
+  const answerHtml = entry.error
+    ? `<span style="color:#ff7070">Error: ${escapeHtml(entry.error)}</span>`
+    : renderMarkdownWithHighlight(entry.answer || (entry.streaming ? '…' : ''), searchKeywords);
+  return `
+    <div class="bubble-pair${hidden}" data-id="${entry.id}">
+      <div class="bubble bubble-q source-${entry.source}">
+        <div class="bubble-head">
+          <span class="badge badge-${entry.source}">${label}</span>
+          <span class="ts">${formatTime(entry.timestamp)}</span>
+        </div>
+        <div>${questionHtml}</div>
+      </div>
+      <div class="bubble bubble-a${entry.streaming ? ' streaming' : ''}${entry.error ? ' error' : ''}">
+        <div>${answerHtml}</div>
+        <div class="bubble-actions">
+          <button class="card-btn copy" data-action="copy" data-id="${entry.id}">copy</button>
+          <button class="card-btn del" data-action="delete" data-id="${entry.id}">×</button>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 // To switch to bubble-style (option A), replace this function.
@@ -384,7 +429,8 @@ function renderHistory() {
     return;
   }
   els.answerBody.classList.remove('placeholder');
-  els.answerBody.innerHTML = history.map(renderCard).join('');
+  const renderer = cfg.layout === 'bubbles' ? renderBubble : renderCard;
+  els.answerBody.innerHTML = history.map(renderer).join('');
   updateHistoryCount();
   els.historyHeader.hidden = false;
 
@@ -431,14 +477,28 @@ function deleteEntry(id) {
 }
 els.clearAll.addEventListener('click', () => { history = []; currentEntryId = null; renderHistory(); });
 
-// Search — filter cards by keyword, with source prefix `typed:` / `screen:` / `heard:`.
-els.search.addEventListener('input', () => {
-  searchQuery = els.search.value;
+// Chip filter (source only). When a chip is active, that overrides the search text's source prefix.
+let chipSource = ''; // '' | 'typed' | 'screen' | 'heard'
+document.querySelectorAll('#source-chips .chip').forEach((chip) => {
+  chip.addEventListener('click', () => {
+    document.querySelectorAll('#source-chips .chip').forEach((c) => c.classList.remove('active'));
+    chip.classList.add('active');
+    chipSource = chip.dataset.source;
+    applySearch();
+  });
+});
+
+function applySearch() {
   const parsed = parseSearch(searchQuery);
-  searchSource = parsed.source;
+  searchSource = chipSource || parsed.source;
   searchKeywords = parsed.keywords;
   renderHistory();
-  updateHistoryCount();
+}
+
+// Search — filter cards by keyword. Source filter comes from chip or `typed:` prefix.
+els.search.addEventListener('input', () => {
+  searchQuery = els.search.value;
+  applySearch();
 });
 els.search.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { els.search.value = ''; els.search.dispatchEvent(new Event('input')); els.search.blur(); }
@@ -634,7 +694,12 @@ function rms(samples) {
 }
 
 async function dispatchChunk(samples) {
-  if (rms(samples) < VAD_RMS_THRESHOLD) return;
+  const level = rms(samples);
+  if (level < VAD_RMS_THRESHOLD) {
+    console.log(`[audio] chunk dropped (silence) rms=${level.toFixed(4)}`);
+    return;
+  }
+  console.log(`[audio] chunk sent rms=${level.toFixed(4)} samples=${samples.length}`);
   const wav = encodeWAV(samples, WHISPER_SAMPLE_RATE);
   transcribeChunk(wav);
 }
@@ -660,11 +725,16 @@ function encodeWAV(samples, sampleRate) {
 async function transcribeChunk(wavArrayBuffer) {
   const result = await window.api.transcribe(cfg.whisperUrl, wavArrayBuffer);
   if (result.error) {
-    // Show the error once via the status pill instead of spamming a transcript panel.
+    console.warn(`[whisper] ERROR: ${result.error}`);
+  } else {
+    console.log(`[whisper] OK: "${(result.text || '').slice(0, 80)}"`);
+  }
+  if (result.error) {
+    // "busy" is expected under CPU load — don't pester the user about it.
+    if (result.error.startsWith('busy')) return;
     if (!transcribeErrorShown) {
       transcribeErrorShown = true;
       setStatus(`whisper: ${result.error}`, false);
-      console.warn('whisper transcription error:', result.error);
       setTimeout(() => setStatus(''), 5000);
     }
     return;
