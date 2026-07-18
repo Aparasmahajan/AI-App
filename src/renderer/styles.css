@@ -20,6 +20,7 @@ html, body {
 body { padding: 6px; }
 
 #app {
+  position: relative;
   height: calc(100vh - 12px);
   display: flex;
   flex-direction: column;
@@ -122,10 +123,12 @@ body { padding: 6px; }
 #body { flex: 1; overflow: hidden; display: flex; }
 #answer {
   flex: 1;
-  padding: 12px 16px;
+  padding: 0 16px;
   overflow-y: auto;
   min-height: 0;
 }
+#answer-body { padding: 12px 0; }
+#answer-body.placeholder { padding: 12px 0; }
 #answer-body { line-height: 1.5; }
 #answer-body.placeholder { color: #7a7a7a; font-size: 0.92em; }
 #answer-body b { color: #d0d0d0; }
@@ -136,6 +139,115 @@ body { padding: 6px; }
   overflow-x: auto;
   font-size: 0.92em;
 }
+
+/* History header — sticky at top of the answer scroll area */
+#history-header {
+  position: sticky;
+  top: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 16px;
+  margin: 0 -16px 8px;
+  background: rgba(20, 22, 28, 0.95);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  font-size: 10px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  z-index: 5;
+}
+#clear-all {
+  background: transparent;
+  color: #666;
+  border: none;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 0;
+}
+#clear-all:hover { color: #ff7070; }
+
+/* Q&A cards */
+.card {
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  position: relative;
+}
+.card:last-child { border-bottom: none; padding-bottom: 4px; }
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 10px;
+}
+.badge {
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.badge-typed  { background: rgba(74,140,255,0.20); color: #7ab0ff; }
+.badge-screen { background: rgba(255,180,80,0.20); color: #ffc580; }
+.badge-heard  { background: rgba(80,220,150,0.20); color: #7fddac; }
+
+.ts { color: #666; margin-right: auto; }
+
+.card-btn {
+  background: transparent;
+  color: #666;
+  border: none;
+  font-size: 10px;
+  padding: 0 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.card:hover .card-btn { opacity: 1; }
+.card-btn:hover { color: #ccc; }
+.card-btn.del:hover { color: #ff7070; }
+
+.card-q {
+  color: #9a9a9a;
+  font-style: italic;
+  font-size: 0.9em;
+  margin-bottom: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.card-a { line-height: 1.5; }
+.card-a pre {
+  background: rgba(255,255,255,0.05);
+  padding: 8px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 0.92em;
+  margin: 4px 0;
+}
+.card-a b { color: #d0d0d0; }
+
+/* Streaming pulse — small dot in the top-right of the active card */
+.card.streaming::after {
+  content: '';
+  position: absolute;
+  right: 4px;
+  top: 12px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4a8cff;
+  animation: pulse 1s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.25; transform: scale(0.85); }
+  50%      { opacity: 1;    transform: scale(1.1); }
+}
+.card.error { border-left: 2px solid #d94a4a; padding-left: 8px; }
 
 #input-row {
   display: flex;
@@ -203,3 +315,17 @@ body { padding: 6px; }
 
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+
+/* Manual resize grip — bottom-right corner. No cursor change (default arrow). */
+#resize-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  background:
+    linear-gradient(135deg, transparent 55%, rgba(255,255,255,0.25) 55%, rgba(255,255,255,0.25) 62%, transparent 62%,
+                             transparent 72%, rgba(255,255,255,0.25) 72%, rgba(255,255,255,0.25) 79%, transparent 79%,
+                             transparent 89%, rgba(255,255,255,0.25) 89%, rgba(255,255,255,0.25) 96%, transparent 96%);
+  z-index: 10;
+}
