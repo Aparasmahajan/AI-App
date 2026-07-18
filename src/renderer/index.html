@@ -50,6 +50,16 @@
         </div>
         <div class="settings-row two-col">
           <div>
+            <label>Layout</label>
+            <select id="cfg-layout">
+              <option value="cards">Cards (compact log)</option>
+              <option value="bubbles">Bubbles (chat-style)</option>
+            </select>
+          </div>
+          <div></div>
+        </div>
+        <div class="settings-row two-col">
+          <div>
             <label>Ollama URL</label>
             <input id="cfg-ollama" type="text" />
           </div>
@@ -67,7 +77,13 @@
       <main id="body">
         <section id="answer">
           <div id="history-header" hidden>
-            <input id="search" type="text" placeholder="Search (typed:  screen:  heard:  …)" />
+            <div id="source-chips">
+              <button class="chip active" data-source="">all</button>
+              <button class="chip" data-source="typed">typed</button>
+              <button class="chip" data-source="screen">screen</button>
+              <button class="chip" data-source="heard">heard</button>
+            </div>
+            <input id="search" type="text" placeholder="Search text…" />
             <span id="history-count-wrap"><span id="history-count">0</span></span>
             <button id="clear-all">clear</button>
           </div>
