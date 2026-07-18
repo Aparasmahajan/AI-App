@@ -6,7 +6,7 @@ const DEFAULTS = {
   ollamaUrl: 'http://127.0.0.1:11434',
   whisperUrl: 'http://127.0.0.1:9000/inference',
   model: 'llama3.2:3b',
-  systemPrompt: 'You are a concise study/teaching assistant. Give a direct, correct answer.',
+  systemPrompt: 'You are a concise study/teaching assistant. Give a direct, correct answer. Also be ware to give a crisp an dconsise answer along with summary at last',
   fontScale: 1,
   appOpacity: 0.82,
 };
@@ -21,6 +21,9 @@ const els = {
   app: document.getElementById('app'),
   answer: document.getElementById('answer'),
   answerBody: document.getElementById('answer-body'),
+  historyHeader: document.getElementById('history-header'),
+  historyCount: document.getElementById('history-count'),
+  clearAll: document.getElementById('clear-all'),
   prompt: document.getElementById('prompt'),
   send: document.getElementById('send'),
   mode: document.getElementById('mode'),
@@ -232,11 +235,103 @@ async function askOllama(userPrompt, extraContext, onToken, signal) {
   return full;
 }
 
-// Auto-scroll: stick to bottom during generation unless the user actively scrolls up.
-// We watch `wheel` and `keydown` (user intent) instead of `scroll` (fires for both
-// user and programmatic — the latter breaks auto-scroll).
-let userScrolledUp = false;
+// ---------- Q&A history model ----------
+// Each entry: { id, source: 'typed'|'screen'|'heard', question, answer, timestamp, streaming, error }
+let history = [];
+let currentEntryId = null;
+const PLACEHOLDER_HTML = els.answerBody.innerHTML; // capture the hotkeys hint
 
+function newEntryId() { return Date.now() + '-' + Math.random().toString(36).slice(2, 6); }
+function escapeHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+function renderMarkdown(text) {
+  return escapeHtml(text)
+    .replace(/```([\s\S]*?)```/g, (_, c) => `<pre>${c}</pre>`)
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/\n/g, '<br/>');
+}
+function formatTime(ts) {
+  const d = new Date(ts);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// To switch to bubble-style (option A), replace this function.
+function renderCard(entry) {
+  const label = { typed: 'TYPED', screen: 'SCREEN', heard: 'HEARD' }[entry.source] || entry.source.toUpperCase();
+  const answerHtml = entry.error
+    ? `<span style="color:#ff7070">Error: ${escapeHtml(entry.error)}</span>`
+    : renderMarkdown(entry.answer || (entry.streaming ? '…' : ''));
+  return `
+    <article class="card${entry.streaming ? ' streaming' : ''}${entry.error ? ' error' : ''}" data-id="${entry.id}">
+      <div class="card-head">
+        <span class="badge badge-${entry.source}">${label}</span>
+        <span class="ts">${formatTime(entry.timestamp)}</span>
+        <button class="card-btn copy" data-action="copy" data-id="${entry.id}">copy</button>
+        <button class="card-btn del" data-action="delete" data-id="${entry.id}">×</button>
+      </div>
+      <div class="card-q">${escapeHtml(entry.question || '')}</div>
+      <div class="card-a">${answerHtml}</div>
+    </article>
+  `;
+}
+
+function renderHistory() {
+  if (!history.length) {
+    els.answerBody.classList.add('placeholder');
+    els.answerBody.innerHTML = PLACEHOLDER_HTML;
+    els.historyHeader.hidden = true;
+    return;
+  }
+  els.answerBody.classList.remove('placeholder');
+  els.answerBody.innerHTML = history.map(renderCard).join('');
+  els.historyCount.textContent = history.length;
+  els.historyHeader.hidden = false;
+
+  // Re-bind per-card action buttons (innerHTML wipes listeners each render)
+  els.answerBody.querySelectorAll('.card-btn').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const { action, id } = btn.dataset;
+      if (action === 'copy') copyEntry(id);
+      else if (action === 'delete') deleteEntry(id);
+    });
+  });
+}
+
+function startEntry(source, question) {
+  const entry = { id: newEntryId(), source, question, answer: '', timestamp: Date.now(), streaming: true, error: null };
+  history.push(entry);
+  currentEntryId = entry.id;
+  renderHistory();
+  scrollToBottom();
+}
+function updateStreamingAnswer(text) {
+  const e = history.find((x) => x.id === currentEntryId);
+  if (!e) return;
+  e.answer = text;
+  renderHistory();
+  if (!userScrolledUp) scrollToBottom();
+}
+function finishEntry(errMsg = null) {
+  const e = history.find((x) => x.id === currentEntryId);
+  if (e) { e.streaming = false; if (errMsg) e.error = errMsg; }
+  currentEntryId = null;
+  renderHistory();
+}
+function copyEntry(id) {
+  const e = history.find((x) => x.id === id);
+  if (!e) return;
+  navigator.clipboard.writeText(e.answer || '');
+  setStatus('copied'); setTimeout(() => setStatus(''), 800);
+}
+function deleteEntry(id) {
+  history = history.filter((x) => x.id !== id);
+  renderHistory();
+}
+els.clearAll.addEventListener('click', () => { history = []; currentEntryId = null; renderHistory(); });
+
+// Auto-scroll
+let userScrolledUp = false;
+function scrollToBottom() { els.answer.scrollTop = els.answer.scrollHeight; }
 function updateScrollLock() {
   const nearBottom = els.answer.scrollTop + els.answer.clientHeight >= els.answer.scrollHeight - 24;
   userScrolledUp = !nearBottom;
@@ -248,32 +343,20 @@ els.answer.addEventListener('keydown', (e) => {
   }
 });
 
-function renderAnswer(text) {
-  els.answerBody.classList.remove('placeholder');
-  const html = text
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/```([\s\S]*?)```/g, (_, c) => `<pre>${c}</pre>`)
-    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
-    .replace(/\n/g, '<br/>');
-  els.answerBody.innerHTML = html;
-  if (!userScrolledUp) els.answer.scrollTop = els.answer.scrollHeight;
-}
-
-async function ask(userPrompt, extraContext = '') {
+async function ask(userPrompt, source, extraContext = '') {
   cancelAll();
   currentAbort = new AbortController();
   setGenerating(true);
   userScrolledUp = false;
+  startEntry(source, userPrompt);
   setStatus('thinking', true);
-  renderAnswer('...');
   try {
-    await askOllama(userPrompt, extraContext, renderAnswer, currentAbort.signal);
+    await askOllama(userPrompt, extraContext, updateStreamingAnswer, currentAbort.signal);
+    finishEntry();
     setStatus('done'); setTimeout(() => setStatus(''), 1000);
   } catch (e) {
-    if (e.name !== 'AbortError') {
-      renderAnswer(`**Error:** ${e.message}`);
-      setStatus('error');
-    }
+    if (e.name === 'AbortError') { finishEntry(); }
+    else { finishEntry(e.message); setStatus('error'); }
   } finally {
     setGenerating(false);
     currentAbort = null;
@@ -284,7 +367,7 @@ async function askFromInput() {
   const q = els.prompt.value.trim();
   if (!q) return;
   els.prompt.value = '';
-  await ask(q);
+  await ask(q, 'typed');
 }
 
 // ---------- OCR ----------
@@ -315,31 +398,32 @@ async function askAboutScreen() {
   setGenerating(true);
   userScrolledUp = false;
   const signal = currentAbort.signal;
+  const q = els.prompt.value.trim() || 'Explain what is on screen and answer any visible question directly.';
+  els.prompt.value = '';
+  startEntry('screen', q);
   try {
-    setStatus('capturing', true); renderAnswer('...capturing screen');
+    setStatus('capturing', true);
     const raw = await window.api.captureScreen();
-    if (signal.aborted) return;
-    if (!raw) { renderAnswer('**Error:** could not capture screen'); return; }
+    if (signal.aborted) { finishEntry(); return; }
+    if (!raw) { finishEntry('could not capture screen'); return; }
 
     setStatus('shrinking', true);
     const small = await downscale(raw, OCR_MAX_WIDTH);
-    if (signal.aborted) return;
+    if (signal.aborted) { finishEntry(); return; }
 
-    setStatus('OCR', true); renderAnswer('...reading text');
+    setStatus('OCR', true);
     const worker = await getOcrWorker();
-    if (signal.aborted) return;
+    if (signal.aborted) { finishEntry(); return; }
     const { data: { text } } = await worker.recognize(small);
-    if (signal.aborted) return;
+    if (signal.aborted) { finishEntry(); return; }
 
-    const q = els.prompt.value.trim() || 'Explain what is on screen and answer any visible question directly.';
-    setStatus('thinking', true); renderAnswer('...');
-    await askOllama(q, text, renderAnswer, signal);
+    setStatus('thinking', true);
+    await askOllama(q, text, updateStreamingAnswer, signal);
+    finishEntry();
     setStatus('done'); setTimeout(() => setStatus(''), 1000);
   } catch (e) {
-    if (e.name !== 'AbortError') {
-      renderAnswer(`**Error:** ${e.message}`);
-      setStatus('error');
-    }
+    if (e.name === 'AbortError') { finishEntry(); }
+    else { finishEntry(e.message); setStatus('error'); }
   } finally {
     setGenerating(false);
     currentAbort = null;
