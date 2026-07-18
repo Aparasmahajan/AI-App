@@ -1,11 +1,16 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer, screen, session, net } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer, screen, session } = require('electron');
 const path = require('path');
 
 const WIN_W = 900;
 const WIN_H = 340;
+const BAR_HEIGHT = 46;         // top zone that becomes interactive on hover (bar + 6 px gutter)
+const EDGE_ZONE = 8;           // outer band where resize cursors need to be reachable
+const CURSOR_POLL_MS = 33;     // ~30 Hz — smooth enough for drag, cheap
 
 let overlay = null;
-let clickThrough = true;
+let userClickThrough = true;   // what user last set via Ctrl+Shift+I
+let currentPassthrough = true; // what the window is actually in right now
+let cursorPollTimer = null;
 
 function createOverlay() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
@@ -19,6 +24,8 @@ function createOverlay() {
     transparent: true,
     alwaysOnTop: true,
     resizable: true,
+    minWidth: 500,
+    minHeight: 160,
     skipTaskbar: true,
     focusable: true,
     hasShadow: false,
@@ -32,9 +39,49 @@ function createOverlay() {
   overlay.setContentProtection(true);
   overlay.setAlwaysOnTop(true, 'screen-saver');
   overlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  overlay.setIgnoreMouseEvents(clickThrough, { forward: true });
+  setPassthrough(true);
 
   overlay.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  startCursorPoll();
+  overlay.on('closed', stopCursorPoll);
+}
+
+function setPassthrough(v) {
+  if (!overlay || v === currentPassthrough) return;
+  currentPassthrough = v;
+  overlay.setIgnoreMouseEvents(v, { forward: true });
+}
+
+// Poll cursor position in main process — bypasses any renderer event-timing
+// weirdness. When the pointer is over the top bar (or bottom input row) of the
+// overlay, we make the window interactive so drag/click work.
+function startCursorPoll() {
+  stopCursorPoll();
+  cursorPollTimer = setInterval(() => {
+    if (!overlay || overlay.isDestroyed() || !overlay.isVisible()) return;
+    if (!userClickThrough) return; // user forced interactive mode via hotkey
+
+    const b = overlay.getBounds();
+    const c = screen.getCursorScreenPoint();
+    const insideWin = c.x >= b.x && c.x <= b.x + b.width && c.y >= b.y && c.y <= b.y + b.height;
+    if (!insideWin) { setPassthrough(true); return; }
+
+    const relX = c.x - b.x;
+    const relY = c.y - b.y;
+    const overTopBar = relY < BAR_HEIGHT;
+    // Bottom zone covers input row (~44 px) + transcript strip (~110 px when visible).
+    // Being generous here is safe — user is only hovering, they haven't clicked anything.
+    const overBottom = relY > b.height - 166;
+    // Outer edge band — required so Windows can render + trigger resize cursors.
+    const overEdge = relX < EDGE_ZONE || relX > b.width - EDGE_ZONE ||
+                     relY < EDGE_ZONE || relY > b.height - EDGE_ZONE;
+
+    setPassthrough(!(overTopBar || overBottom || overEdge));
+  }, CURSOR_POLL_MS);
+}
+function stopCursorPoll() {
+  if (cursorPollTimer) { clearInterval(cursorPollTimer); cursorPollTimer = null; }
 }
 
 function showOverlay() {
@@ -67,9 +114,9 @@ function registerHotkeys() {
 
   tryRegister('CommandOrControl+Shift+I', () => {
     if (!overlay) return;
-    clickThrough = !clickThrough;
-    overlay.setIgnoreMouseEvents(clickThrough, { forward: true });
-    overlay.webContents.send('interactive-mode', !clickThrough);
+    userClickThrough = !userClickThrough;
+    setPassthrough(userClickThrough);
+    overlay.webContents.send('interactive-mode', !userClickThrough);
   });
 
   tryRegister('CommandOrControl+Shift+A', () => overlay?.webContents.send('trigger-screen-ask'));
@@ -77,14 +124,12 @@ function registerHotkeys() {
   tryRegister('CommandOrControl+Shift+X', () => overlay?.webContents.send('cancel-all'));
   tryRegister('CommandOrControl+Shift+K', () => overlay?.webContents.send('toggle-collapse'));
 
-  // Font size: Ctrl+= / Ctrl+- (also register Shift variants because keyboards vary)
   tryRegister('CommandOrControl+=', () => overlay?.webContents.send('font-delta', +1));
   tryRegister('CommandOrControl+Plus', () => overlay?.webContents.send('font-delta', +1));
   tryRegister('CommandOrControl+Shift+=', () => overlay?.webContents.send('font-delta', +1));
   tryRegister('CommandOrControl+-', () => overlay?.webContents.send('font-delta', -1));
   tryRegister('CommandOrControl+Shift+-', () => overlay?.webContents.send('font-delta', -1));
 
-  // Opacity: Ctrl+Shift+] increase, Ctrl+Shift+[ decrease
   tryRegister('CommandOrControl+Shift+]', () => overlay?.webContents.send('opacity-delta', +0.05));
   tryRegister('CommandOrControl+Shift+[', () => overlay?.webContents.send('opacity-delta', -0.05));
 
@@ -97,10 +142,9 @@ function registerHotkeys() {
   });
 }
 
-// Renderer streams pointer position; here we flip passthrough based on whether
-// the pointer is inside an interactive region (bar / input / settings).
-ipcMain.on('set-mouse-passthrough', (_e, passthrough) => {
-  overlay?.setIgnoreMouseEvents(passthrough, { forward: true });
+// Real window opacity — affects the whole window at the OS level.
+ipcMain.on('set-window-opacity', (_e, value) => {
+  overlay?.setOpacity(Math.max(0.2, Math.min(1.0, value)));
 });
 
 ipcMain.handle('capture-screen', async () => {
@@ -120,12 +164,17 @@ ipcMain.handle('list-ollama-models', async () => {
   } catch { return []; }
 });
 
-// Transcribe from main process — bypasses renderer CORS. whisper-server.exe
-// doesn't send Access-Control-Allow-Origin, so renderer fetch() gets blocked.
+ipcMain.handle('whisper-test', async (_e, url) => {
+  try {
+    const res = await fetch(url.replace(/\/inference\/?$/, '/'), { method: 'GET' });
+    return { ok: true, status: res.status };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
 ipcMain.handle('whisper-transcribe', async (_e, { url, wavBuffer }) => {
   try {
-    // Manually build multipart/form-data — Node's FormData + fetch works but
-    // we want to keep this dependency-free.
     const boundary = '----ovBoundary' + Math.random().toString(36).slice(2);
     const preamble = Buffer.from(
       `--${boundary}\r\n` +
@@ -146,7 +195,7 @@ ipcMain.handle('whisper-transcribe', async (_e, { url, wavBuffer }) => {
       headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
       body,
     });
-    if (!res.ok) throw new Error(`whisper HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const j = await res.json();
     return { text: (j.text || '').trim() };
   } catch (e) {
@@ -169,5 +218,5 @@ app.whenReady().then(() => {
   registerHotkeys();
 });
 
-app.on('will-quit', () => globalShortcut.unregisterAll());
+app.on('will-quit', () => { globalShortcut.unregisterAll(); stopCursorPoll(); });
 app.on('window-all-closed', () => app.quit());
