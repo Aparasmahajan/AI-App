@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer, screen, session } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, desktopCapturer, screen, session, safeStorage } = require('electron');
 const path = require('path');
 const http = require('http');
 const fs = require('fs');
@@ -11,21 +11,73 @@ const WHISPER_CLI = path.join(__dirname, '..', 'addon', 'whisper-blas-bin-x64', 
 const WHISPER_MODEL = path.join(__dirname, '..', 'addon', 'ggml-base.en.bin');
 
 // Persist config (including API keys) to a JSON file in Electron's userData dir.
-// localStorage in dev mode can get wiped when the partition changes; this survives.
+// API-key values are encrypted with safeStorage (OS keychain: DPAPI on Windows)
+// so config.json can be safely inspected even if leaked — keys look like base64
+// blobs, un-decryptable without your Windows login. Non-key fields stay plain.
 function configPath() { return path.join(app.getPath('userData'), 'config.json'); }
-function loadConfigFromDisk() {
+
+function encryptString(plain) {
+  if (!plain) return '';
   try {
-    if (fs.existsSync(configPath())) return JSON.parse(fs.readFileSync(configPath(), 'utf8'));
-  } catch (e) { console.warn('config load failed:', e.message); }
+    if (safeStorage.isEncryptionAvailable()) {
+      return 'enc:' + safeStorage.encryptString(String(plain)).toString('base64');
+    }
+  } catch (e) { console.warn('encrypt failed:', e.message); }
+  return 'b64:' + Buffer.from(String(plain), 'utf8').toString('base64'); // fallback
+}
+function decryptString(stored) {
+  if (!stored) return '';
+  try {
+    if (stored.startsWith('enc:')) {
+      return safeStorage.decryptString(Buffer.from(stored.slice(4), 'base64'));
+    }
+    if (stored.startsWith('b64:')) {
+      return Buffer.from(stored.slice(4), 'base64').toString('utf8');
+    }
+    return stored; // plain (legacy / migrated on next save)
+  } catch (e) { console.warn('decrypt failed:', e.message); return ''; }
+}
+
+function encryptCfg(cfg) {
+  const out = { ...cfg };
+  if (cfg.apiKeys) {
+    out.apiKeys = {};
+    for (const k of Object.keys(cfg.apiKeys)) out.apiKeys[k] = encryptString(cfg.apiKeys[k]);
+  }
+  return out;
+}
+function decryptCfg(cfg) {
+  const out = { ...cfg };
+  if (cfg.apiKeys) {
+    out.apiKeys = {};
+    for (const k of Object.keys(cfg.apiKeys)) out.apiKeys[k] = decryptString(cfg.apiKeys[k]);
+  }
+  return out;
+}
+
+function loadConfigFromDisk() {
+  const p = configPath();
+  try {
+    if (fs.existsSync(p)) {
+      const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+      const cfg = decryptCfg(raw);
+      console.log(`[config] loaded from ${p} (keys: ${Object.keys(cfg.apiKeys || {}).join(', ') || 'none'})`);
+      return cfg;
+    }
+    console.log(`[config] no file at ${p} — starting fresh`);
+  } catch (e) { console.warn(`[config] load failed at ${p}:`, e.message); }
   return {};
 }
 function saveConfigToDisk(cfg) {
+  const p = configPath();
   try {
-    fs.mkdirSync(path.dirname(configPath()), { recursive: true });
-    fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2), 'utf8');
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(encryptCfg(cfg), null, 2), 'utf8');
+    console.log(`[config] saved to ${p} (keys: ${Object.keys(cfg.apiKeys || {}).join(', ') || 'none'})`);
     return true;
-  } catch (e) { console.warn('config save failed:', e.message); return false; }
+  } catch (e) { console.warn(`[config] save failed at ${p}:`, e.message); return false; }
 }
+
 // Cache in memory; exposed synchronously to the renderer via preload.
 let cachedConfig = null;
 ipcMain.on('config-get-sync', (e) => {
@@ -37,6 +89,9 @@ ipcMain.handle('config-save', (_e, next) => {
   return saveConfigToDisk(next);
 });
 ipcMain.handle('config-path', () => configPath());
+ipcMain.handle('config-encryption', () => {
+  try { return safeStorage.isEncryptionAvailable(); } catch { return false; }
+});
 
 const WIN_W = 900; 
 const WIN_H = 600; 

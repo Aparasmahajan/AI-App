@@ -311,10 +311,12 @@ function loadConfig() {
 }
 let cfg = loadConfig();
 function currentApiKey() { return cfg.apiKeys?.[cfg.provider] || ''; }
-function saveConfig(next) {
+async function saveConfig(next) {
   cfg = { ...cfg, ...next };
   localStorage.setItem('cfg', JSON.stringify(cfg));   // legacy mirror
-  window.api.persistConfig(cfg);                       // authoritative on-disk copy
+  const ok = await window.api.persistConfig(cfg);      // authoritative on-disk copy
+  if (!ok) console.warn('[config] persist returned false — check terminal for reason');
+  return ok;
 }
 function applyVisualConfig() {
   document.documentElement.style.setProperty('--font-scale', cfg.fontScale);
@@ -402,12 +404,12 @@ els.cfgTest.addEventListener('click', async () => {
   else setStatus(`whisper: ${r.error}`, false);
   setTimeout(() => setStatus(''), 4000);
 });
-els.cfgSave.addEventListener('click', () => {
+els.cfgSave.addEventListener('click', async () => {
   // Prefer the text-entered model over the dropdown selection (lets you type any model id).
   const modelValue = els.cfgModelText.value.trim() || els.cfgModel.value || DEFAULTS.model;
   const selectedProvider = els.cfgProvider.value || DEFAULTS.provider;
   const nextKeys = { ...(cfg.apiKeys || {}), [selectedProvider]: els.cfgApiKey.value };
-  saveConfig({
+  const ok = await saveConfig({
     provider: selectedProvider,
     apiKeys: nextKeys,
     apiBase: els.cfgApiBase.value.trim(),
@@ -420,9 +422,9 @@ els.cfgSave.addEventListener('click', () => {
     layout: els.cfgLayout.value || DEFAULTS.layout,
   });
   transcribeErrorShown = false; // re-arm the whisper warning for new URL
-  setStatus('saved');
-  setTimeout(() => setStatus(''), 1200);
-  els.settings.hidden = true;
+  setStatus(ok ? 'saved to disk' : 'save failed — see terminal');
+  setTimeout(() => setStatus(''), 1500);
+  if (ok) els.settings.hidden = true;
   warmModel(); // pre-load the (possibly new) model
 });
 els.cfgReset.addEventListener('click', () => {

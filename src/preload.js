@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('api', {
   getInitialConfig: () => initialConfig,
   persistConfig: (cfg) => ipcRenderer.invoke('config-save', cfg),
   getConfigPath: () => ipcRenderer.invoke('config-path'),
+  isEncryptionAvailable: () => ipcRenderer.invoke('config-encryption'),
   captureScreen: () => ipcRenderer.invoke('capture-screen'),
   listOllamaModels: () => ipcRenderer.invoke('list-ollama-models'),
   transcribe: (wavBuffer) => ipcRenderer.invoke('whisper-transcribe', { wavBuffer }),
