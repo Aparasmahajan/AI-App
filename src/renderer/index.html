@@ -35,7 +35,7 @@
             <input id="cfg-ollama" type="text" />
           </div>
           <div>
-            <label>Whisper URL</label>
+            <label>Whisper URL &nbsp; <button id="cfg-test" type="button" title="Test connection">test</button></label>
             <input id="cfg-whisper" type="text" />
           </div>
         </div>
@@ -47,7 +47,6 @@
 
       <main id="body">
         <section id="answer">
-          <div class="label">Answer</div>
           <div id="answer-body" class="placeholder">
             <b>Ctrl+Shift+H</b> hide/show &nbsp; <b>Ctrl+Shift+I</b> interact &nbsp; <b>Ctrl+Shift+K</b> collapse<br/>
             <b>Ctrl+Shift+A</b> ask screen &nbsp; <b>Ctrl+Shift+L</b> listen &nbsp; <b>Ctrl+Shift+X</b> stop<br/>
@@ -55,17 +54,20 @@
             Drag by the title bar (works in click-through). Click ⚙ for model + system prompt.
           </div>
         </section>
-
-        <section id="transcript-wrap">
-          <div class="label">Live transcript</div>
-          <div id="transcript"></div>
-        </section>
       </main>
 
       <footer id="input-row">
-        <input id="prompt" placeholder="Ask anything... (uses transcript + screen as context)" />
+        <input id="prompt" placeholder="Ask anything..." />
         <button id="send">Ask</button>
       </footer>
+
+      <section id="transcript-wrap" hidden>
+        <div class="tx-header">
+          <span class="tx-label">Live transcript</span>
+          <button id="tx-clear" title="Clear transcript">clear</button>
+        </div>
+        <div id="transcript"></div>
+      </section>
     </div>
 
     <script src="../../node_modules/tesseract.js/dist/tesseract.min.js"></script>

@@ -1,5 +1,6 @@
-// Renderer: UI, drag, audio pipeline, OCR, LLM.
-// Whisper transcription is routed through main (bypasses CORS).
+// Renderer: UI, audio pipeline, OCR, LLM.
+// Passthrough (click-through) is now handled entirely by main-process cursor polling,
+// so this file no longer touches setIgnoreMouseEvents.
 
 const DEFAULTS = {
   ollamaUrl: 'http://127.0.0.1:11434',
@@ -16,21 +17,15 @@ const CHUNK_SECONDS = 3;
 const CHUNK_OVERLAP_SECONDS = 0.5;
 const VAD_RMS_THRESHOLD = 0.008;
 
-// Any pointer y-coordinate below this (in window px) is treated as "over the
-// title bar" — used to auto-flip passthrough off so drag works in click-through.
-const BAR_HEIGHT_PX = 40;
-
 const els = {
   app: document.getElementById('app'),
-  answer: document.getElementById('answer-body'),
-  transcript: document.getElementById('transcript'),
+  answer: document.getElementById('answer'),
+  answerBody: document.getElementById('answer-body'),
   prompt: document.getElementById('prompt'),
   send: document.getElementById('send'),
   mode: document.getElementById('mode'),
   listen: document.getElementById('listen'),
   status: document.getElementById('status'),
-  bar: document.getElementById('bar'),
-  inputRow: document.getElementById('input-row'),
   gear: document.getElementById('gear'),
   collapse: document.getElementById('collapse'),
   settings: document.getElementById('settings'),
@@ -41,9 +36,18 @@ const els = {
   cfgWhisper: document.getElementById('cfg-whisper'),
   cfgSave: document.getElementById('cfg-save'),
   cfgReset: document.getElementById('cfg-reset'),
+  cfgTest: document.getElementById('cfg-test'),
+  transcriptWrap: document.getElementById('transcript-wrap'),
+  transcript: document.getElementById('transcript'),
+  txClear: document.getElementById('tx-clear'),
 };
 
-let transcriptBuffer = '';
+els.txClear.addEventListener('click', () => {
+  transcriptBuffer = '';
+  els.transcript.textContent = '';
+});
+
+let transcriptBuffer = '';  // kept in memory for LLM context; not shown
 let listening = false;
 let audioCtx = null;
 let sourceNodes = [];
@@ -54,6 +58,7 @@ let ocrWorkerPromise = null;
 let interactive = false;
 let generating = false;
 let collapsed = false;
+let transcribeErrorShown = false; // only warn about whisper once per session
 
 // ---------- Config ----------
 function loadConfig() {
@@ -67,7 +72,7 @@ function saveConfig(next) {
 }
 function applyVisualConfig() {
   document.documentElement.style.setProperty('--font-scale', cfg.fontScale);
-  document.documentElement.style.setProperty('--app-opacity', cfg.appOpacity);
+  window.api.setWindowOpacity(cfg.appOpacity);
 }
 applyVisualConfig();
 
@@ -83,62 +88,11 @@ function setGenerating(v) {
   els.send.classList.toggle('stop', v);
 }
 
-// ---------- Drag / passthrough via continuous mousemove ----------
-// With `setIgnoreMouseEvents(true, {forward: true})`, Electron forwards mousemove
-// to the renderer even while passthrough is on. We use those events to detect
-// when the pointer is over an interactive region and flip passthrough off.
-// mouseenter/mouseleave on DOM elements don't fire reliably in passthrough mode,
-// so we do position-based detection on document instead.
-let passthrough = true;
-function isOverInteractive(x, y) {
-  if (interactive) return true;
-  if (y < BAR_HEIGHT_PX) return true;                                     // top bar
-  if (!els.settings.hidden && els.settings.contains(document.elementFromPoint(x, y))) return true;
-  const inputRect = els.inputRow.getBoundingClientRect();
-  if (y >= inputRect.top && y <= inputRect.bottom) return true;           // bottom input row
-  return false;
-}
-document.addEventListener('mousemove', (e) => {
-  const over = isOverInteractive(e.clientX, e.clientY);
-  if (over && passthrough) {
-    passthrough = false;
-    window.api.setMousePassthrough(false);
-  } else if (!over && !passthrough) {
-    passthrough = true;
-    window.api.setMousePassthrough(true);
-  }
-});
-
-// Manual drag on the bar — works because we've already turned passthrough off
-// by the time mouse is over the bar. We use the Electron-native `-webkit-app-region: drag`
-// on the bar via CSS below, but we ALSO implement JS drag as a fallback in case
-// the app-region trick lags behind the passthrough toggle.
-let dragging = false;
-let dragStartX = 0, dragStartY = 0;
-els.bar.addEventListener('mousedown', (e) => {
-  if (e.target.closest('button') || e.target.closest('.pill')) return;
-  dragging = true;
-  dragStartX = e.screenX;
-  dragStartY = e.screenY;
-});
-window.addEventListener('mousemove', (e) => {
-  if (!dragging) return;
-  const dx = e.screenX - dragStartX;
-  const dy = e.screenY - dragStartY;
-  if (dx || dy) {
-    dragStartX = e.screenX;
-    dragStartY = e.screenY;
-    window.moveBy(dx, dy);
-  }
-});
-window.addEventListener('mouseup', () => { dragging = false; });
-
 // ---------- Hotkey / IPC wiring ----------
 window.api.onInteractiveMode((v) => {
   interactive = v;
   els.mode.textContent = interactive ? 'interactive' : 'click-through';
   els.mode.className = 'pill ' + (interactive ? 'on' : 'dim');
-  if (interactive) { passthrough = false; window.api.setMousePassthrough(false); }
 });
 window.api.onTriggerScreenAsk(() => askAboutScreen());
 window.api.onToggleListen(() => (listening ? stopListening() : startListening()));
@@ -176,6 +130,14 @@ els.gear.addEventListener('click', () => {
   if (showing) hydrateSettings();
 });
 els.cfgRefresh.addEventListener('click', populateModels);
+els.cfgTest.addEventListener('click', async () => {
+  els.cfgTest.textContent = '...';
+  const r = await window.api.testWhisper(els.cfgWhisper.value.trim() || cfg.whisperUrl);
+  els.cfgTest.textContent = 'test';
+  if (r.ok) setStatus(`whisper ok (HTTP ${r.status})`, true);
+  else setStatus(`whisper: ${r.error}`, false);
+  setTimeout(() => setStatus(''), 4000);
+});
 els.cfgSave.addEventListener('click', () => {
   saveConfig({
     ollamaUrl: els.cfgOllama.value.trim() || DEFAULTS.ollamaUrl,
@@ -183,7 +145,8 @@ els.cfgSave.addEventListener('click', () => {
     model: els.cfgModel.value || DEFAULTS.model,
     systemPrompt: els.cfgSystem.value.trim() || DEFAULTS.systemPrompt,
   });
-  setStatus('settings saved');
+  transcribeErrorShown = false; // re-arm the whisper warning for new URL
+  setStatus('saved');
   setTimeout(() => setStatus(''), 1200);
   els.settings.hidden = true;
 });
@@ -215,12 +178,13 @@ async function populateModels() {
   }
 }
 
-// ---------- Cancel ----------
+// ---------- Cancel — always resets state ----------
 function cancelAll() {
-  if (currentAbort) { currentAbort.abort(); currentAbort = null; }
+  if (currentAbort) { try { currentAbort.abort(); } catch {} }
+  currentAbort = null;
   setGenerating(false);
   setStatus('cancelled');
-  setTimeout(() => setStatus(''), 1200);
+  setTimeout(() => setStatus(''), 1000);
 }
 
 // ---------- LLM ----------
@@ -256,29 +220,48 @@ async function askOllama(userPrompt, extraContext, onToken, signal) {
   return full;
 }
 
+// Auto-scroll: stick to bottom during generation unless the user actively scrolls up.
+// We watch `wheel` and `keydown` (user intent) instead of `scroll` (fires for both
+// user and programmatic — the latter breaks auto-scroll).
+let userScrolledUp = false;
+
+function updateScrollLock() {
+  const nearBottom = els.answer.scrollTop + els.answer.clientHeight >= els.answer.scrollHeight - 24;
+  userScrolledUp = !nearBottom;
+}
+els.answer.addEventListener('wheel', () => setTimeout(updateScrollLock, 0));
+els.answer.addEventListener('keydown', (e) => {
+  if (['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '].includes(e.key)) {
+    setTimeout(updateScrollLock, 0);
+  }
+});
+
 function renderAnswer(text) {
-  els.answer.classList.remove('placeholder');
+  els.answerBody.classList.remove('placeholder');
   const html = text
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/```([\s\S]*?)```/g, (_, c) => `<pre>${c}</pre>`)
     .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
     .replace(/\n/g, '<br/>');
-  els.answer.innerHTML = html;
+  els.answerBody.innerHTML = html;
+  if (!userScrolledUp) els.answer.scrollTop = els.answer.scrollHeight;
 }
 
 async function ask(userPrompt, extraContext = '') {
   cancelAll();
   currentAbort = new AbortController();
   setGenerating(true);
+  userScrolledUp = false;
   setStatus('thinking', true);
   renderAnswer('...');
   try {
     await askOllama(userPrompt, extraContext, renderAnswer, currentAbort.signal);
     setStatus('done'); setTimeout(() => setStatus(''), 1000);
   } catch (e) {
-    if (e.name === 'AbortError') return;
-    renderAnswer(`**Error:** ${e.message}`);
-    setStatus('error');
+    if (e.name !== 'AbortError') {
+      renderAnswer(`**Error:** ${e.message}`);
+      setStatus('error');
+    }
   } finally {
     setGenerating(false);
     currentAbort = null;
@@ -318,6 +301,7 @@ async function askAboutScreen() {
   cancelAll();
   currentAbort = new AbortController();
   setGenerating(true);
+  userScrolledUp = false;
   const signal = currentAbort.signal;
   try {
     setStatus('capturing', true); renderAnswer('...capturing screen');
@@ -340,9 +324,10 @@ async function askAboutScreen() {
     await askOllama(q, text, renderAnswer, signal);
     setStatus('done'); setTimeout(() => setStatus(''), 1000);
   } catch (e) {
-    if (e.name === 'AbortError') return;
-    renderAnswer(`**Error:** ${e.message}`);
-    setStatus('error');
+    if (e.name !== 'AbortError') {
+      renderAnswer(`**Error:** ${e.message}`);
+      setStatus('error');
+    }
   } finally {
     setGenerating(false);
     currentAbort = null;
@@ -393,8 +378,10 @@ async function startListening() {
     processorNode.connect(audioCtx.destination);
 
     listening = true;
+    transcribeErrorShown = false;
     els.listen.textContent = 'listening';
     els.listen.className = 'pill on';
+    els.transcriptWrap.hidden = false;
   } catch (e) {
     renderAnswer(`**Audio error:** ${e.message}`);
     listening = false;
@@ -446,25 +433,31 @@ function encodeWAV(samples, sampleRate) {
 }
 
 async function transcribeChunk(wavArrayBuffer) {
-  try {
-    const result = await window.api.transcribe(cfg.whisperUrl, wavArrayBuffer);
-    if (result.error) throw new Error(result.error);
-    const text = result.text;
-    if (!text) return;
-
-    const tail = transcriptBuffer.slice(-80).toLowerCase();
-    const head = text.slice(0, 80).toLowerCase();
-    let overlap = 0;
-    for (let n = Math.min(tail.length, head.length); n > 4; n--) {
-      if (tail.endsWith(head.slice(0, n))) { overlap = n; break; }
+  const result = await window.api.transcribe(cfg.whisperUrl, wavArrayBuffer);
+  if (result.error) {
+    // Show the error once via the status pill instead of spamming a transcript panel.
+    if (!transcribeErrorShown) {
+      transcribeErrorShown = true;
+      setStatus(`whisper: ${result.error}`, false);
+      console.warn('whisper transcription error:', result.error);
+      setTimeout(() => setStatus(''), 5000);
     }
-    const cleaned = overlap ? text.slice(overlap) : text;
-    if (!cleaned.trim()) return;
-
-    transcriptBuffer += ' ' + cleaned;
-    els.transcript.textContent = transcriptBuffer.slice(-1200);
-    els.transcript.scrollTop = els.transcript.scrollHeight;
-  } catch (e) {
-    els.transcript.textContent = `[transcription unavailable: ${e.message}]\n` + els.transcript.textContent;
+    return;
   }
+  const text = result.text;
+  if (!text) return;
+
+  // Dedup the overlap
+  const tail = transcriptBuffer.slice(-80).toLowerCase();
+  const head = text.slice(0, 80).toLowerCase();
+  let overlap = 0;
+  for (let n = Math.min(tail.length, head.length); n > 4; n--) {
+    if (tail.endsWith(head.slice(0, n))) { overlap = n; break; }
+  }
+  const cleaned = overlap ? text.slice(overlap) : text;
+  if (!cleaned.trim()) return;
+
+  transcriptBuffer += ' ' + cleaned;
+  els.transcript.textContent = transcriptBuffer.slice(-2000);
+  els.transcript.scrollTop = els.transcript.scrollHeight;
 }
