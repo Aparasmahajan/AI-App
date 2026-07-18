@@ -10,6 +10,34 @@ const { URL } = require('url');
 const WHISPER_CLI = path.join(__dirname, '..', 'addon', 'whisper-blas-bin-x64', 'Release', 'whisper-cli.exe');
 const WHISPER_MODEL = path.join(__dirname, '..', 'addon', 'ggml-base.en.bin');
 
+// Persist config (including API keys) to a JSON file in Electron's userData dir.
+// localStorage in dev mode can get wiped when the partition changes; this survives.
+function configPath() { return path.join(app.getPath('userData'), 'config.json'); }
+function loadConfigFromDisk() {
+  try {
+    if (fs.existsSync(configPath())) return JSON.parse(fs.readFileSync(configPath(), 'utf8'));
+  } catch (e) { console.warn('config load failed:', e.message); }
+  return {};
+}
+function saveConfigToDisk(cfg) {
+  try {
+    fs.mkdirSync(path.dirname(configPath()), { recursive: true });
+    fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2), 'utf8');
+    return true;
+  } catch (e) { console.warn('config save failed:', e.message); return false; }
+}
+// Cache in memory; exposed synchronously to the renderer via preload.
+let cachedConfig = null;
+ipcMain.on('config-get-sync', (e) => {
+  if (!cachedConfig) cachedConfig = loadConfigFromDisk();
+  e.returnValue = cachedConfig;
+});
+ipcMain.handle('config-save', (_e, next) => {
+  cachedConfig = next;
+  return saveConfigToDisk(next);
+});
+ipcMain.handle('config-path', () => configPath());
+
 const WIN_W = 900; 
 const WIN_H = 600; 
 const BAR_HEIGHT = 46;         // top zone that becomes interactive on hover (bar + 6 px gutter)

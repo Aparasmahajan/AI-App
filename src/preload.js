@@ -1,6 +1,12 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Sync read at page-load time so the renderer has config before it initializes.
+const initialConfig = ipcRenderer.sendSync('config-get-sync') || {};
+
 contextBridge.exposeInMainWorld('api', {
+  getInitialConfig: () => initialConfig,
+  persistConfig: (cfg) => ipcRenderer.invoke('config-save', cfg),
+  getConfigPath: () => ipcRenderer.invoke('config-path'),
   captureScreen: () => ipcRenderer.invoke('capture-screen'),
   listOllamaModels: () => ipcRenderer.invoke('list-ollama-models'),
   transcribe: (wavBuffer) => ipcRenderer.invoke('whisper-transcribe', { wavBuffer }),

@@ -4,7 +4,7 @@
 
 const DEFAULTS = {
   provider: 'ollama', // 'ollama' | 'groq' | 'openai' | 'openrouter' | 'gemini' | 'custom'
-  apiKey: '',
+  apiKeys: {},        // per-provider keys: { groq: '...', openai: '...', gemini: '...', ... }
   apiBase: '',        // only used for 'custom'; other providers are hardcoded
   ollamaUrl: 'http://127.0.0.1:11434',
   whisperUrl: 'http://127.0.0.1:9000/inference',
@@ -91,6 +91,10 @@ const els = {
   historyCount: document.getElementById('history-count'),
   clearAll: document.getElementById('clear-all'),
   search: document.getElementById('search'),
+  matchNav: document.getElementById('match-nav'),
+  matchCount: document.getElementById('match-count'),
+  matchPrev: document.getElementById('match-prev'),
+  matchNext: document.getElementById('match-next'),
   prompt: document.getElementById('prompt'),
   send: document.getElementById('send'),
   mode: document.getElementById('mode'),
@@ -290,14 +294,27 @@ let collapsed = false;
 let transcribeErrorShown = false; // only warn about whisper once per session
 
 // ---------- Config ----------
+// Primary source of truth: JSON file in Electron's userData dir (via main process).
+// LocalStorage is kept as a fallback for legacy installs but the file wins on read.
 function loadConfig() {
-  try { return { ...DEFAULTS, ...(JSON.parse(localStorage.getItem('cfg') || '{}')) }; }
-  catch { return { ...DEFAULTS }; }
+  const fromDisk = window.api.getInitialConfig() || {};
+  let fromLocal = {};
+  try { fromLocal = JSON.parse(localStorage.getItem('cfg') || '{}'); } catch {}
+  const merged = { ...DEFAULTS, ...fromLocal, ...fromDisk };
+  // Migrate legacy single `apiKey` field into the per-provider map.
+  if (merged.apiKey && (!merged.apiKeys || !merged.apiKeys[merged.provider])) {
+    merged.apiKeys = { ...(merged.apiKeys || {}), [merged.provider]: merged.apiKey };
+  }
+  delete merged.apiKey; // don't persist the legacy field going forward
+  merged.apiKeys = merged.apiKeys || {};
+  return merged;
 }
 let cfg = loadConfig();
+function currentApiKey() { return cfg.apiKeys?.[cfg.provider] || ''; }
 function saveConfig(next) {
   cfg = { ...cfg, ...next };
-  localStorage.setItem('cfg', JSON.stringify(cfg));
+  localStorage.setItem('cfg', JSON.stringify(cfg));   // legacy mirror
+  window.api.persistConfig(cfg);                       // authoritative on-disk copy
 }
 function applyVisualConfig() {
   document.documentElement.style.setProperty('--font-scale', cfg.fontScale);
@@ -388,9 +405,11 @@ els.cfgTest.addEventListener('click', async () => {
 els.cfgSave.addEventListener('click', () => {
   // Prefer the text-entered model over the dropdown selection (lets you type any model id).
   const modelValue = els.cfgModelText.value.trim() || els.cfgModel.value || DEFAULTS.model;
+  const selectedProvider = els.cfgProvider.value || DEFAULTS.provider;
+  const nextKeys = { ...(cfg.apiKeys || {}), [selectedProvider]: els.cfgApiKey.value };
   saveConfig({
-    provider: els.cfgProvider.value || DEFAULTS.provider,
-    apiKey: els.cfgApiKey.value,
+    provider: selectedProvider,
+    apiKeys: nextKeys,
     apiBase: els.cfgApiBase.value.trim(),
     ollamaUrl: els.cfgOllama.value.trim() || DEFAULTS.ollamaUrl,
     whisperUrl: els.cfgWhisper.value.trim() || DEFAULTS.whisperUrl,
@@ -416,7 +435,8 @@ els.cfgReset.addEventListener('click', () => {
 
 function hydrateSettings() {
   els.cfgProvider.value = cfg.provider;
-  els.cfgApiKey.value = cfg.apiKey;
+  els.cfgApiKey.value = currentApiKey();
+  els.cfgApiKey.placeholder = `paste ${PROVIDERS[cfg.provider]?.label || cfg.provider} key`;
   els.cfgApiBase.value = cfg.apiBase;
   els.cfgApiBaseRow.hidden = cfg.provider !== 'custom';
   els.cfgOllama.value = cfg.ollamaUrl;
@@ -429,12 +449,15 @@ function hydrateSettings() {
   populateModels();
 }
 
-// Show/hide custom base URL row when provider changes; pre-fill default model + refresh dropdown.
+// Show/hide custom base URL row when provider changes; pre-fill default model,
+// swap the API key input to that provider's saved key, refresh model dropdown.
 els.cfgProvider.addEventListener('change', () => {
   const p = els.cfgProvider.value;
   els.cfgApiBaseRow.hidden = p !== 'custom';
   const def = PROVIDERS[p]?.defaultModel;
   if (def) els.cfgModelText.value = def;
+  els.cfgApiKey.value = cfg.apiKeys?.[p] || '';
+  els.cfgApiKey.placeholder = `paste ${PROVIDERS[p]?.label || p} key`;
   populateModels();
 });
 
@@ -539,14 +562,15 @@ async function askOpenAICompat(provider, userPrompt, extraContext, onToken, sign
   const meta = PROVIDERS[provider] || {};
   const base = (provider === 'custom' ? cfg.apiBase : meta.base) || '';
   if (!base) throw new Error(`No API base URL configured for ${provider}`);
-  if (!cfg.apiKey) throw new Error(`API key missing — open ⚙ and paste your ${meta.label || provider} key`);
+  const key = currentApiKey();
+  if (!key) throw new Error(`API key missing — open ⚙ and paste your ${meta.label || provider} key`);
 
   const { userMessage } = buildContext(userPrompt, extraContext);
   const res = await fetch(`${base.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${cfg.apiKey}`,
+      'Authorization': `Bearer ${key}`,
     },
     body: JSON.stringify({
       model: cfg.model,
@@ -591,10 +615,11 @@ async function askOpenAICompat(provider, userPrompt, extraContext, onToken, sign
 
 // Google Gemini — different API shape. Streams via streamGenerateContent SSE.
 async function askGemini(userPrompt, extraContext, onToken, signal) {
-  if (!cfg.apiKey) throw new Error('API key missing — open ⚙ and paste your Gemini key');
+  const key = currentApiKey();
+  if (!key) throw new Error('API key missing — open ⚙ and paste your Gemini key');
   const { userMessage } = buildContext(userPrompt, extraContext);
   const base = PROVIDERS.gemini.base;
-  const url = `${base}/models/${encodeURIComponent(cfg.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(cfg.apiKey)}`;
+  const url = `${base}/models/${encodeURIComponent(cfg.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(key)}`;
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -775,6 +800,7 @@ function renderHistory() {
   const renderer = cfg.layout === 'bubbles' ? renderBubble : renderCard;
   els.answerBody.innerHTML = history.map(renderer).join('');
   updateHistoryCount();
+  refreshMatches();
   els.historyHeader.hidden = false;
 
   // Re-bind per-card action buttons (innerHTML wipes listeners each render)
@@ -841,6 +867,7 @@ function applySearch() {
 // Search — filter cards by keyword. Source filter comes from chip or `typed:` prefix.
 els.search.addEventListener('input', () => {
   searchQuery = els.search.value;
+  currentMatchIdx = 0; // jump to first match on new query
   applySearch();
 });
 els.search.addEventListener('keydown', (e) => {
@@ -860,6 +887,45 @@ function updateHistoryCount() {
   const visible = history.filter(entryMatchesSearch).length;
   els.historyCount.textContent = (searchQuery ? `${visible}/${history.length}` : history.length);
 }
+
+// ---------- Chrome-style match navigation (Enter / Shift+Enter / ↑ ↓) ----------
+let matchElements = [];
+let currentMatchIdx = -1;
+
+function refreshMatches() {
+  matchElements = Array.from(els.answerBody.querySelectorAll('mark'));
+  if (!matchElements.length) {
+    els.matchNav.hidden = true;
+    currentMatchIdx = -1;
+    return;
+  }
+  els.matchNav.hidden = false;
+  if (currentMatchIdx >= matchElements.length || currentMatchIdx < 0) currentMatchIdx = 0;
+  highlightCurrent();
+}
+
+function highlightCurrent() {
+  matchElements.forEach((m, i) => m.classList.toggle('current', i === currentMatchIdx));
+  els.matchCount.textContent = `${currentMatchIdx + 1}/${matchElements.length}`;
+  const cur = matchElements[currentMatchIdx];
+  if (cur) cur.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  els.matchPrev.disabled = matchElements.length < 2;
+  els.matchNext.disabled = matchElements.length < 2;
+}
+
+function stepMatch(delta) {
+  if (!matchElements.length) return;
+  currentMatchIdx = (currentMatchIdx + delta + matchElements.length) % matchElements.length;
+  highlightCurrent();
+}
+
+els.matchNext.addEventListener('click', () => stepMatch(+1));
+els.matchPrev.addEventListener('click', () => stepMatch(-1));
+
+// Enter in search box → next match; Shift+Enter → previous.
+els.search.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); stepMatch(e.shiftKey ? -1 : +1); }
+});
 
 // Auto-scroll
 let userScrolledUp = false;
