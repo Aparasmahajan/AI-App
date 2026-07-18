@@ -18,10 +18,32 @@
       </header>
 
       <section id="settings" hidden>
+        <div class="settings-row two-col">
+          <div>
+            <label>Provider</label>
+            <select id="cfg-provider">
+              <option value="ollama">Ollama (local)</option>
+              <option value="groq">Groq (fast + free)</option>
+              <option value="openai">OpenAI</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="gemini">Google Gemini (free)</option>
+              <option value="custom">Custom OpenAI-compat</option>
+            </select>
+          </div>
+          <div>
+            <label>API key</label>
+            <input id="cfg-apikey" type="password" placeholder="paste key here (blank for Ollama)" />
+          </div>
+        </div>
+        <div class="settings-row" id="cfg-apibase-row" hidden>
+          <label>Custom API base URL</label>
+          <input id="cfg-apibase" type="text" placeholder="https://…/v1" />
+        </div>
         <div class="settings-row">
           <label>Model</label>
           <div style="display:flex; gap:6px;">
             <select id="cfg-model"></select>
+            <input id="cfg-model-text" type="text" placeholder="or type model id" style="flex:1;" />
             <button id="cfg-refresh">↻</button>
           </div>
         </div>

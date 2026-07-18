@@ -96,6 +96,12 @@ body { padding: 6px; }
   width: 100%;
   resize: vertical;
 }
+/* Chromium renders <option> using OS defaults — force dark theme so the
+   dropdown itself isn't a bright white flash. */
+.settings-row select option, .settings-row select optgroup {
+  background: #1a1c22;
+  color: #e6e6e6;
+}
 #cfg-refresh, #cfg-test {
   background: rgba(255,255,255,0.08);
   color: #ccc;

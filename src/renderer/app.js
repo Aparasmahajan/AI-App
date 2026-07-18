@@ -3,15 +3,78 @@
 // so this file no longer touches setIgnoreMouseEvents.
 
 const DEFAULTS = {
+  provider: 'ollama', // 'ollama' | 'groq' | 'openai' | 'openrouter' | 'gemini' | 'custom'
+  apiKey: '',
+  apiBase: '',        // only used for 'custom'; other providers are hardcoded
   ollamaUrl: 'http://127.0.0.1:11434',
   whisperUrl: 'http://127.0.0.1:9000/inference',
   model: 'llama3.2:3b',
   systemPrompt: 'You are a concise study/teaching assistant master of JAVA, SQL, DSA, System Design and Kafka. Give a direct, correct and human like answer not bookish one. Also be ware to give a crisp a consise answer along with summary at last. For coding question add an understandable comments too where ever required.',
   fontScale: 1,
   appOpacity: 0.82,
-  maxTokens: 400,     // cap on answer length; smaller = faster on CPU
-  contextChars: 1200, // per section (transcript, screen); smaller = faster
-  layout: 'cards',    // 'cards' | 'bubbles'
+  maxTokens: 400,
+  contextChars: 1200,
+  layout: 'cards',
+};
+
+// Provider registry. Everything except gemini uses OpenAI-compatible /chat/completions.
+// `models` = curated recommended list for each provider. User can still type any model id.
+const PROVIDERS = {
+  ollama: {
+    label: 'Ollama (local)', needsKey: false, defaultModel: 'llama3.2:3b',
+    // Ollama models are auto-loaded from local `ollama list`; this fallback is used only if none pulled.
+    models: ['llama3.2:3b', 'llama3.2:1b', 'qwen2.5:3b', 'phi3:mini', 'gemma2:2b'],
+  },
+  groq: {
+    label: 'Groq (fast + free)', needsKey: true, base: 'https://api.groq.com/openai/v1',
+    defaultModel: 'llama-3.3-70b-versatile',
+    models: [
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant',
+      'llama3-70b-8192',
+      'llama3-8b-8192',
+      'qwen-2.5-32b',
+      'qwen-2.5-coder-32b',
+      'deepseek-r1-distill-llama-70b',
+      'mixtral-8x7b-32768',
+      'gemma2-9b-it',
+    ],
+  },
+  openai: {
+    label: 'OpenAI', needsKey: true, base: 'https://api.openai.com/v1',
+    defaultModel: 'gpt-4o-mini',
+    models: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1', 'o4-mini', 'o3-mini', 'gpt-3.5-turbo'],
+  },
+  openrouter: {
+    label: 'OpenRouter', needsKey: true, base: 'https://openrouter.ai/api/v1',
+    defaultModel: 'meta-llama/llama-3.3-70b-instruct:free',
+    models: [
+      'meta-llama/llama-3.3-70b-instruct:free',
+      'deepseek/deepseek-r1:free',
+      'deepseek/deepseek-chat:free',
+      'google/gemini-2.0-flash-exp:free',
+      'qwen/qwen-2.5-72b-instruct:free',
+      'mistralai/mistral-7b-instruct:free',
+      'anthropic/claude-3.5-sonnet',
+      'openai/gpt-4o-mini',
+    ],
+  },
+  gemini: {
+    label: 'Google Gemini (free)', needsKey: true, base: 'https://generativelanguage.googleapis.com/v1beta',
+    defaultModel: 'gemini-2.0-flash',
+    models: [
+      'gemini-2.0-flash',
+      'gemini-2.0-flash-lite',
+      'gemini-1.5-flash',
+      'gemini-1.5-flash-8b',
+      'gemini-1.5-pro',
+      'gemini-exp-1206',
+    ],
+  },
+  custom: {
+    label: 'Custom OpenAI-compat', needsKey: true, defaultModel: '',
+    models: [],
+  },
 };
 
 const OCR_MAX_WIDTH = 1280;
@@ -36,7 +99,12 @@ const els = {
   gear: document.getElementById('gear'),
   collapse: document.getElementById('collapse'),
   settings: document.getElementById('settings'),
+  cfgProvider: document.getElementById('cfg-provider'),
+  cfgApiKey: document.getElementById('cfg-apikey'),
+  cfgApiBase: document.getElementById('cfg-apibase'),
+  cfgApiBaseRow: document.getElementById('cfg-apibase-row'),
   cfgModel: document.getElementById('cfg-model'),
+  cfgModelText: document.getElementById('cfg-model-text'),
   cfgRefresh: document.getElementById('cfg-refresh'),
   cfgSystem: document.getElementById('cfg-system'),
   cfgOllama: document.getElementById('cfg-ollama'),
@@ -237,18 +305,17 @@ function applyVisualConfig() {
 }
 applyVisualConfig();
 
-// Warm up the model so the first real question doesn't pay the 10-30s cold-load cost.
+// Warm up the local model so the first Ollama request doesn't pay cold-load cost.
+// No-op for cloud providers (they're always warm).
 async function warmModel() {
+  if (cfg.provider !== 'ollama') return;
   try {
     await fetch(`${cfg.ollamaUrl.replace(/\/$/, '')}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: cfg.model,
-        prompt: 'hi',
-        stream: false,
-        keep_alive: '30m',
-        options: { num_predict: 1 },
+        model: cfg.model, prompt: 'hi', stream: false,
+        keep_alive: '30m', options: { num_predict: 1 },
       }),
     });
   } catch (e) { console.warn('model warmup failed:', e.message); }
@@ -319,10 +386,15 @@ els.cfgTest.addEventListener('click', async () => {
   setTimeout(() => setStatus(''), 4000);
 });
 els.cfgSave.addEventListener('click', () => {
+  // Prefer the text-entered model over the dropdown selection (lets you type any model id).
+  const modelValue = els.cfgModelText.value.trim() || els.cfgModel.value || DEFAULTS.model;
   saveConfig({
+    provider: els.cfgProvider.value || DEFAULTS.provider,
+    apiKey: els.cfgApiKey.value,
+    apiBase: els.cfgApiBase.value.trim(),
     ollamaUrl: els.cfgOllama.value.trim() || DEFAULTS.ollamaUrl,
     whisperUrl: els.cfgWhisper.value.trim() || DEFAULTS.whisperUrl,
-    model: els.cfgModel.value || DEFAULTS.model,
+    model: modelValue,
     systemPrompt: els.cfgSystem.value.trim() || DEFAULTS.systemPrompt,
     maxTokens: parseInt(els.cfgTokens.value, 10) || DEFAULTS.maxTokens,
     contextChars: parseInt(els.cfgCtx.value, 10) || DEFAULTS.contextChars,
@@ -343,14 +415,28 @@ els.cfgReset.addEventListener('click', () => {
 });
 
 function hydrateSettings() {
+  els.cfgProvider.value = cfg.provider;
+  els.cfgApiKey.value = cfg.apiKey;
+  els.cfgApiBase.value = cfg.apiBase;
+  els.cfgApiBaseRow.hidden = cfg.provider !== 'custom';
   els.cfgOllama.value = cfg.ollamaUrl;
   els.cfgWhisper.value = cfg.whisperUrl;
   els.cfgSystem.value = cfg.systemPrompt;
   els.cfgTokens.value = String(cfg.maxTokens);
   els.cfgCtx.value = String(cfg.contextChars);
   els.cfgLayout.value = cfg.layout;
+  els.cfgModelText.value = cfg.model;
   populateModels();
 }
+
+// Show/hide custom base URL row when provider changes; pre-fill default model + refresh dropdown.
+els.cfgProvider.addEventListener('change', () => {
+  const p = els.cfgProvider.value;
+  els.cfgApiBaseRow.hidden = p !== 'custom';
+  const def = PROVIDERS[p]?.defaultModel;
+  if (def) els.cfgModelText.value = def;
+  populateModels();
+});
 
 // Live layout switch — re-renders instantly, no need to Save.
 els.cfgLayout && els.cfgLayout.addEventListener('change', () => {
@@ -361,11 +447,21 @@ els.cfgLayout && els.cfgLayout.addEventListener('change', () => {
 // Apply layout class on load
 document.body.classList.toggle('layout-bubbles', cfg.layout === 'bubbles');
 async function populateModels() {
-  els.cfgModel.innerHTML = '<option>loading...</option>';
-  const list = await window.api.listOllamaModels();
+  const provider = els.cfgProvider.value || cfg.provider;
+  let models;
+  if (provider === 'ollama') {
+    els.cfgModel.innerHTML = '<option>loading...</option>';
+    const list = await window.api.listOllamaModels();
+    models = list.length ? list : (PROVIDERS.ollama.models || [cfg.model]);
+  } else {
+    models = PROVIDERS[provider]?.models || [];
+  }
   els.cfgModel.innerHTML = '';
-  const models = list.length ? list : [cfg.model];
-  if (!models.includes(cfg.model)) models.unshift(cfg.model);
+  if (!models.length) {
+    els.cfgModel.innerHTML = '<option value="">(type model id →)</option>';
+    return;
+  }
+  if (!models.includes(cfg.model)) models = [cfg.model, ...models].filter(Boolean);
   for (const m of models) {
     const opt = document.createElement('option');
     opt.value = m; opt.textContent = m;
@@ -373,6 +469,11 @@ async function populateModels() {
     els.cfgModel.appendChild(opt);
   }
 }
+
+// Picking from the dropdown fills the text input so you can see / edit / save what you picked.
+els.cfgModel.addEventListener('change', () => {
+  if (els.cfgModel.value) els.cfgModelText.value = els.cfgModel.value;
+});
 
 // ---------- Cancel — always resets state ----------
 function cancelAll() {
@@ -384,13 +485,25 @@ function cancelAll() {
 }
 
 // ---------- LLM ----------
-async function askOllama(userPrompt, extraContext, onToken, signal) {
-  const ctxParts = [
+function buildContext(userPrompt, extraContext) {
+  const parts = [
     transcriptBuffer && `# Recent conversation transcript\n${transcriptBuffer.slice(-cfg.contextChars)}`,
     extraContext && `# On-screen text\n${extraContext.slice(-cfg.contextChars)}`,
   ].filter(Boolean).join('\n\n');
-  const fullPrompt = `${cfg.systemPrompt}\n\n${ctxParts}\n\n# Question\n${userPrompt}\n\n# Answer`;
+  return { userMessage: parts ? `${parts}\n\n# Question\n${userPrompt}` : userPrompt };
+}
 
+// Router — dispatches to the right adapter based on cfg.provider.
+async function askAI(userPrompt, extraContext, onToken, signal) {
+  const p = cfg.provider;
+  if (p === 'ollama') return askOllama(userPrompt, extraContext, onToken, signal);
+  if (p === 'gemini') return askGemini(userPrompt, extraContext, onToken, signal);
+  return askOpenAICompat(p, userPrompt, extraContext, onToken, signal);
+}
+
+async function askOllama(userPrompt, extraContext, onToken, signal) {
+  const { userMessage } = buildContext(userPrompt, extraContext);
+  const fullPrompt = `${cfg.systemPrompt}\n\n${userMessage}\n\n# Answer`;
   const res = await fetch(`${cfg.ollamaUrl.replace(/\/$/, '')}/api/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -398,19 +511,12 @@ async function askOllama(userPrompt, extraContext, onToken, signal) {
       model: cfg.model,
       prompt: fullPrompt,
       stream: true,
-      keep_alive: '30m', // keep the model resident so subsequent calls skip disk load
-      options: {
-        num_predict: cfg.maxTokens,  // cap answer length (biggest speedup on CPU)
-        num_ctx: 2048,               // context window; larger uses more RAM/CPU
-        temperature: 0.3,
-        top_k: 40,
-        top_p: 0.9,
-      },
+      keep_alive: '30m',
+      options: { num_predict: cfg.maxTokens, num_ctx: 2048, temperature: 0.3, top_k: 40, top_p: 0.9 },
     }),
     signal,
   });
   if (!res.ok) throw new Error(`Ollama HTTP ${res.status} — is 'ollama serve' running and '${cfg.model}' pulled?`);
-
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let full = '', buf = '';
@@ -423,6 +529,104 @@ async function askOllama(userPrompt, extraContext, onToken, signal) {
     for (const line of lines) {
       if (!line.trim()) continue;
       try { const j = JSON.parse(line); if (j.response) { full += j.response; onToken(full); } } catch {}
+    }
+  }
+  return full;
+}
+
+// OpenAI-compatible: Groq, OpenAI, OpenRouter, custom. All use /chat/completions with SSE.
+async function askOpenAICompat(provider, userPrompt, extraContext, onToken, signal) {
+  const meta = PROVIDERS[provider] || {};
+  const base = (provider === 'custom' ? cfg.apiBase : meta.base) || '';
+  if (!base) throw new Error(`No API base URL configured for ${provider}`);
+  if (!cfg.apiKey) throw new Error(`API key missing — open ⚙ and paste your ${meta.label || provider} key`);
+
+  const { userMessage } = buildContext(userPrompt, extraContext);
+  const res = await fetch(`${base.replace(/\/$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${cfg.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: cfg.model,
+      messages: [
+        { role: 'system', content: cfg.systemPrompt },
+        { role: 'user', content: userMessage },
+      ],
+      max_tokens: cfg.maxTokens,
+      temperature: 0.3,
+      stream: true,
+    }),
+    signal,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`${meta.label || provider} HTTP ${res.status} — ${body.slice(0, 200)}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let full = '', buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const payload = trimmed.slice(5).trim();
+      if (payload === '[DONE]') return full;
+      try {
+        const j = JSON.parse(payload);
+        const delta = j.choices?.[0]?.delta?.content;
+        if (delta) { full += delta; onToken(full); }
+      } catch {}
+    }
+  }
+  return full;
+}
+
+// Google Gemini — different API shape. Streams via streamGenerateContent SSE.
+async function askGemini(userPrompt, extraContext, onToken, signal) {
+  if (!cfg.apiKey) throw new Error('API key missing — open ⚙ and paste your Gemini key');
+  const { userMessage } = buildContext(userPrompt, extraContext);
+  const base = PROVIDERS.gemini.base;
+  const url = `${base}/models/${encodeURIComponent(cfg.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(cfg.apiKey)}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { role: 'system', parts: [{ text: cfg.systemPrompt }] },
+      contents: [{ role: 'user', parts: [{ text: userMessage }] }],
+      generationConfig: { maxOutputTokens: cfg.maxTokens, temperature: 0.3 },
+    }),
+    signal,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Gemini HTTP ${res.status} — ${body.slice(0, 200)}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let full = '', buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const payload = trimmed.slice(5).trim();
+      try {
+        const j = JSON.parse(payload);
+        const delta = j.candidates?.[0]?.content?.parts?.map((p) => p.text).join('');
+        if (delta) { full += delta; onToken(full); }
+      } catch {}
     }
   }
   return full;
@@ -679,7 +883,7 @@ async function ask(userPrompt, source, extraContext = '') {
   startEntry(source, userPrompt);
   setStatus('thinking', true);
   try {
-    await askOllama(userPrompt, extraContext, updateStreamingAnswer, currentAbort.signal);
+    await askAI(userPrompt, extraContext, updateStreamingAnswer, currentAbort.signal);
     finishEntry();
     setStatus('done'); setTimeout(() => setStatus(''), 1000);
   } catch (e) {
@@ -746,7 +950,7 @@ async function askAboutScreen() {
     if (signal.aborted) { finishEntry(); return; }
 
     setStatus('thinking', true);
-    await askOllama(q, text, updateStreamingAnswer, signal);
+    await askAI(q, text, updateStreamingAnswer, signal);
     finishEntry();
     setStatus('done'); setTimeout(() => setStatus(''), 1000);
   } catch (e) {
