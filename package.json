@@ -18,7 +18,7 @@
   },
   "build": {
     "appId": "com.local.stealth-assistant",
-    "productName": "StudyOverlay",
+    "productName": "InHack",
     "win": {
       "target": "nsis"
     }

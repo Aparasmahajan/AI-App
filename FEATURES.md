@@ -13,7 +13,7 @@
 - Recenter any time with `Ctrl+Shift+C`.
 
 ## Drag anywhere via the title bar (works in click-through mode)
-- Grab the `⋮⋮ StudyOverlay` bar to move the window.
+- Grab the `⋮⋮ InHack` bar to move the window.
 - Drag is implemented in JS on `mousedown` in the bar (window.moveBy on each mousemove) — not the CSS `-webkit-app-region: drag` trick, which was unreliable when the app was in passthrough mode.
 - **Continuous position tracking:** while the app is click-through, the renderer watches every `mousemove` (Electron forwards them via `setIgnoreMouseEvents(true, {forward: true})`). Whenever your cursor is in the top 40 px, inside the input row, or inside the open settings panel, passthrough is turned off so drag / click work. Move away and passthrough returns.
 - Toggle full interactive mode with `Ctrl+Shift+I` if you want to click into the answer body or scroll it.
