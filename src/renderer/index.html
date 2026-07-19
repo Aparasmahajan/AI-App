@@ -78,7 +78,15 @@
               <option value="bubbles">Bubbles (chat-style)</option>
             </select>
           </div>
-          <div></div>
+          <div>
+            <label>Auto-scroll speed</label>
+            <select id="cfg-scroll">
+              <option value="line">Line-by-line (readable)</option>
+              <option value="slow">Slow</option>
+              <option value="medium">Medium</option>
+              <option value="fast">Fast (snap)</option>
+            </select>
+          </div>
         </div>
         <div class="settings-row two-col">
           <div>
@@ -86,8 +94,8 @@
             <input id="cfg-ollama" type="text" />
           </div>
           <div>
-            <label>Whisper URL &nbsp; <button id="cfg-test" type="button">test</button></label>
-            <input id="cfg-whisper" type="text" />
+            <label>Whisper (bundled) &nbsp; <button id="cfg-test" type="button">test</button></label>
+            <input id="cfg-whisper" type="text" placeholder="uses local whisper-cli.exe" disabled />
           </div>
         </div>
         <div class="settings-actions">

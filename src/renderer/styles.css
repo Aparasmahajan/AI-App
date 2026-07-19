@@ -96,12 +96,59 @@ body { padding: 6px; }
   width: 100%;
   resize: vertical;
 }
-/* Chromium renders <option> using OS defaults — force dark theme so the
-   dropdown itself isn't a bright white flash. */
-.settings-row select option, .settings-row select optgroup {
-  background: #1a1c22;
+/* Chromium renders <option> using OS defaults — but the dropdown popup is a
+   separate OS window that BYPASSES content protection (visible in screen share).
+   So we hide native selects and render custom dropdowns via .dd-* below. */
+.settings-row select { display: none !important; }
+
+/* Custom in-window dropdown — covered by setContentProtection */
+.dd-wrap { position: relative; width: 100%; }
+.dd-trigger {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.1);
   color: #e6e6e6;
+  border-radius: 5px;
+  padding: 5px 22px 5px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  outline: none;
+  width: 100%;
+  text-align: left;
+  position: relative;
 }
+.dd-trigger::after {
+  content: '▾';
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #888;
+  font-size: 9px;
+}
+.dd-trigger:hover { background: rgba(255,255,255,0.09); }
+.dd-panel {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 2px;
+  background: #1a1c22;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 5px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 100;
+  padding: 3px;
+}
+.dd-item {
+  padding: 4px 8px;
+  font-size: 11px;
+  color: #d0d0d0;
+  border-radius: 3px;
+}
+.dd-item:hover { background: rgba(74,140,255,0.2); color: #ffffff; }
+.dd-item.selected { background: rgba(74,140,255,0.3); color: #ffffff; }
 #cfg-refresh, #cfg-test {
   background: rgba(255,255,255,0.08);
   color: #ccc;
