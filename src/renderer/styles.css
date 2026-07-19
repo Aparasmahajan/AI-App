@@ -1,5 +1,30 @@
 :root {
   --font-scale: 1;
+  /* Dark theme (default) */
+  --bg-app: rgba(15, 17, 22, 0.85);
+  --bg-bar: rgba(255, 255, 255, 0.06);
+  --bg-panel: rgba(255, 255, 255, 0.02);
+  --bg-input: rgba(255, 255, 255, 0.06);
+  --bg-hover: rgba(255, 255, 255, 0.12);
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #e6e6e6;
+  --text-strong: #d0d0d0;
+  --text-dim: #888;
+  --text-mute: #666;
+  --code-bg: rgba(255, 255, 255, 0.05);
+}
+:root[data-theme="light"] {
+  --bg-app: rgba(255, 255, 255, 0.85);
+  --bg-bar: rgba(0, 0, 0, 0.06);
+  --bg-panel: rgba(0, 0, 0, 0.02);
+  --bg-input: rgba(0, 0, 0, 0.05);
+  --bg-hover: rgba(0, 0, 0, 0.10);
+  --border: rgba(0, 0, 0, 0.10);
+  --text: #1a1c22;
+  --text-strong: #000000;
+  --text-dim: #555;
+  --text-mute: #888;
+  --code-bg: rgba(0, 0, 0, 0.06);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -9,7 +34,7 @@ input, textarea, select, button { cursor: default; }
 html, body {
   height: 100%;
   font-family: 'Segoe UI', system-ui, sans-serif;
-  color: #e6e6e6;
+  color: var(--text);
   background: transparent;
   user-select: none;
   -webkit-user-select: none;
@@ -24,9 +49,9 @@ body { padding: 6px; }
   height: calc(100vh - 12px);
   display: flex;
   flex-direction: column;
-  background: rgba(15, 17, 22, 0.85);
+  background: var(--bg-app);
   backdrop-filter: blur(14px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
   border-radius: 12px;
   overflow: hidden;
 }
@@ -61,7 +86,7 @@ body { padding: 6px; }
 .pill.on { background: #2f8a4a; color: white; }
 #status:empty { display: none; }
 
-#collapse, #gear {
+#collapse, #gear, #bold-toggle {
   background: rgba(255,255,255,0.06);
   color: #ccc;
   border: 1px solid rgba(255,255,255,0.1);
@@ -72,7 +97,36 @@ body { padding: 6px; }
   line-height: 1;
   -webkit-app-region: no-drag;
 }
-#collapse:hover, #gear:hover { background: rgba(255,255,255,0.12); }
+#collapse:hover, #gear:hover, #bold-toggle:hover { background: rgba(255,255,255,0.12); }
+#bold-toggle { font-weight: 700; padding: 2px 7px; }
+#bold-toggle.on { background: rgba(74,140,255,0.3); color: #fff; border-color: rgba(74,140,255,0.6); }
+
+.color-palette {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+  -webkit-app-region: no-drag;
+}
+.color-btn {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.25);
+  padding: 0;
+  background: transparent; /* "default" */
+  position: relative;
+}
+.color-btn[data-color="default"] {
+  background: linear-gradient(135deg, #666 50%, #444 50%);
+}
+.color-btn.active { outline: 2px solid #4a8cff; outline-offset: 1px; }
+
+/* Answer text color / weight overrides */
+#answer-body[data-text-color="red"], #answer-body[data-text-color="red"] * { color: #ff5555 !important; }
+#answer-body[data-text-color="black"], #answer-body[data-text-color="black"] * { color: #000 !important; }
+#answer-body[data-text-color="white"], #answer-body[data-text-color="white"] * { color: #fff !important; }
+#answer-body[data-text-bold="true"] { font-weight: 700; }
+#answer-body[data-text-bold="true"] .card-a, #answer-body[data-text-bold="true"] .bubble-a { font-weight: 700; }
 
 #settings {
   padding: 10px 14px;

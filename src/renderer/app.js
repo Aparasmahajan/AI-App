@@ -16,6 +16,9 @@ const DEFAULTS = {
   contextChars: 2000,
   layout: 'cards',
   scrollMode: 'medium',   // 'line' | 'slow' | 'medium' | 'fast'
+  theme: 'dark',          // 'dark' | 'light'
+  textColor: 'default',   // 'default' | 'red' | 'black' | 'white'
+  textBold: false,
 };
 
 // Pixels-per-second for each paced scroll mode. `fast` = snap.
@@ -129,6 +132,7 @@ const els = {
   cfgCtx: document.getElementById('cfg-ctx'),
   cfgLayout: document.getElementById('cfg-layout'),
   cfgScroll: document.getElementById('cfg-scroll'),
+  cfgTheme: document.getElementById('cfg-theme'),
   transcriptWrap: document.getElementById('transcript-wrap'),
   transcript: document.getElementById('transcript'),
   txClear: document.getElementById('tx-clear'),
@@ -378,9 +382,36 @@ async function saveConfig(next) {
 }
 function applyVisualConfig() {
   document.documentElement.style.setProperty('--font-scale', cfg.fontScale);
+  document.documentElement.setAttribute('data-theme', cfg.theme || 'dark');
   window.api.setWindowOpacity(cfg.appOpacity);
+  applyTextStyle();
+}
+function applyTextStyle() {
+  const body = document.getElementById('answer-body');
+  if (!body) return;
+  if (cfg.textColor && cfg.textColor !== 'default') body.setAttribute('data-text-color', cfg.textColor);
+  else body.removeAttribute('data-text-color');
+  body.setAttribute('data-text-bold', String(!!cfg.textBold));
+  // Update palette + bold button UI state
+  document.querySelectorAll('.color-btn').forEach((b) => {
+    b.classList.toggle('active', b.dataset.color === (cfg.textColor || 'default'));
+  });
+  const boldBtn = document.getElementById('bold-toggle');
+  if (boldBtn) boldBtn.classList.toggle('on', !!cfg.textBold);
 }
 applyVisualConfig();
+
+// Color palette + bold in the title bar — click to set/toggle, persists immediately.
+document.querySelectorAll('.color-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    saveConfig({ textColor: btn.dataset.color });
+    applyTextStyle();
+  });
+});
+document.getElementById('bold-toggle').addEventListener('click', () => {
+  saveConfig({ textBold: !cfg.textBold });
+  applyTextStyle();
+});
 
 // Warm up the local model so the first Ollama request doesn't pay cold-load cost.
 // No-op for cloud providers (they're always warm).
@@ -437,7 +468,24 @@ window.api.onOpacityDelta((d) => {
 });
 
 els.send.addEventListener('click', () => (generating ? cancelAll() : askFromInput()));
-els.prompt.addEventListener('keydown', (e) => { if (e.key === 'Enter') askFromInput(); });
+els.prompt.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    askFromInput();
+    // Blur so subsequent ↑ / PageUp / etc. reach the global scroll handler
+    // (otherwise they'd move the caret inside the empty input and do nothing useful).
+    els.prompt.blur();
+    els.answer.focus();
+  }
+});
+// Even while typing in the prompt, ↑ / PageUp / PageDown / Home / End should
+// scroll the answer — they don't do anything useful in a single-line input.
+els.prompt.addEventListener('keydown', (e) => {
+  if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(e.key)) {
+    // For a text input, Home/End move the caret — keep that unless input is empty.
+    if ((e.key === 'Home' || e.key === 'End') && els.prompt.value.length > 0) return;
+    if (handleScrollKey(e.key, e.shiftKey)) e.preventDefault();
+  }
+});
 els.collapse.addEventListener('click', toggleCollapse);
 
 function toggleCollapse() {
@@ -479,6 +527,7 @@ els.cfgSave.addEventListener('click', async () => {
     contextChars: parseInt(els.cfgCtx.value, 10) || DEFAULTS.contextChars,
     layout: els.cfgLayout.value || DEFAULTS.layout,
     scrollMode: els.cfgScroll.value || DEFAULTS.scrollMode,
+    theme: els.cfgTheme.value || DEFAULTS.theme,
   });
   transcribeErrorShown = false; // re-arm the whisper warning for new URL
   setStatus(ok ? 'saved to disk' : 'save failed — see terminal');
@@ -507,6 +556,7 @@ function hydrateSettings() {
   els.cfgCtx.value = String(cfg.contextChars);
   els.cfgLayout.value = cfg.layout;
   els.cfgScroll.value = cfg.scrollMode;
+  els.cfgTheme.value = cfg.theme;
   els.cfgModelText.value = cfg.model;
   populateModels();
 }
@@ -560,8 +610,13 @@ els.cfgModel.addEventListener('change', () => {
   if (els.cfgModel.value) els.cfgModelText.value = els.cfgModel.value;
 });
 
+// Live theme swap on change — no need to hit Save.
+els.cfgTheme.addEventListener('change', () => {
+  document.documentElement.setAttribute('data-theme', els.cfgTheme.value);
+});
+
 // Wrap every native <select> with a custom dropdown that renders inside the window.
-[els.cfgProvider, els.cfgTokens, els.cfgCtx, els.cfgLayout, els.cfgScroll, els.cfgModel].forEach(enhanceSelect);
+[els.cfgProvider, els.cfgTokens, els.cfgCtx, els.cfgLayout, els.cfgScroll, els.cfgTheme, els.cfgModel].forEach(enhanceSelect);
 
 // ---------- Cancel — always resets state ----------
 function cancelAll() {
@@ -1055,45 +1110,35 @@ document.addEventListener('keydown', (e) => {
   if (inField) return;
   // If the answer already has focus its own handler will run — don't double-scroll.
   if (document.activeElement === els.answer) return;
-  const step = 40;
-  const page = els.answer.clientHeight * 0.9;
-  let handled = true;
-  switch (e.key) {
-    case 'ArrowDown': els.answer.scrollTop += step; break;
-    case 'ArrowUp':   els.answer.scrollTop -= step; break;
-    case 'PageDown':  els.answer.scrollTop += page; break;
-    case 'PageUp':    els.answer.scrollTop -= page; break;
-    case 'Home':      els.answer.scrollTop = 0; break;
-    case 'End':       els.answer.scrollTop = els.answer.scrollHeight; break;
-    default: handled = false;
-  }
-  if (handled) {
-    e.preventDefault();
-    setTimeout(updateScrollLock, 0);
-  }
+  if (handleScrollKey(e.key, e.shiftKey)) e.preventDefault();
 });
 
 // Arrow / PageUp / PageDown / Home / End → scroll the answer panel manually.
-// Doing it explicitly (not relying on native tabindex scroll) so it works
-// consistently and updates our own userScrolledUp lock.
-els.answer.addEventListener('keydown', (e) => {
+// Any "scroll up / away from bottom" key immediately pauses auto-scroll (like
+// the mouse wheel). "End" jumps to bottom and re-arms auto-scroll.
+function handleScrollKey(key, shift) {
   const step = 40;
   const page = els.answer.clientHeight * 0.9;
-  let handled = true;
-  switch (e.key) {
-    case 'ArrowDown': els.answer.scrollTop += step; break;
-    case 'ArrowUp':   els.answer.scrollTop -= step; break;
-    case 'PageDown':  els.answer.scrollTop += page; break;
-    case 'PageUp':    els.answer.scrollTop -= page; break;
-    case 'Home':      els.answer.scrollTop = 0; break;
-    case 'End':       els.answer.scrollTop = els.answer.scrollHeight; break;
-    case ' ':         els.answer.scrollTop += e.shiftKey ? -page : page; break;
-    default: handled = false;
+  let up = false, down = false;
+  switch (key) {
+    case 'ArrowDown': els.answer.scrollTop += step; down = true; break;
+    case 'ArrowUp':   els.answer.scrollTop -= step; up = true; break;
+    case 'PageDown':  els.answer.scrollTop += page; down = true; break;
+    case 'PageUp':    els.answer.scrollTop -= page; up = true; break;
+    case 'Home':      els.answer.scrollTop = 0;                up = true; break;
+    case 'End':       els.answer.scrollTop = els.answer.scrollHeight; down = true; break;
+    case ' ':         if (shift) { els.answer.scrollTop -= page; up = true; } else { els.answer.scrollTop += page; down = true; } break;
+    default: return false;
   }
-  if (handled) {
-    e.preventDefault();
-    setTimeout(updateScrollLock, 0);
-  }
+  // Explicit pause on any upward movement — don't rely on nearBottom tolerance.
+  if (up) userScrolledUp = true;
+  // Downward: re-check via updateScrollLock so we resume when reaching bottom.
+  if (down) setTimeout(() => { updateScrollLock(); if (!userScrolledUp) scheduleScroll(); }, 0);
+  return true;
+}
+
+els.answer.addEventListener('keydown', (e) => {
+  if (handleScrollKey(e.key, e.shiftKey)) e.preventDefault();
 });
 
 async function ask(userPrompt, source, extraContext = '') {
