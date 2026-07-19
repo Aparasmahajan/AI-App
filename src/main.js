@@ -6,9 +6,13 @@ const os = require('os');
 const { spawn } = require('child_process');
 const { URL } = require('url');
 
-// Bundled whisper-cli.exe + model. These paths are hardcoded to your addon/ tree.
-const WHISPER_CLI = path.join(__dirname, '..', 'addon', 'whisper-blas-bin-x64', 'Release', 'whisper-cli.exe');
-const WHISPER_MODEL = path.join(__dirname, '..', 'addon', 'ggml-base.en.bin');
+// Bundled whisper-cli.exe + model.
+// Dev: <project>/addon/... Packaged: <install>/resources/addon/...
+const ADDON_ROOT = app.isPackaged
+  ? path.join(process.resourcesPath, 'addon')
+  : path.join(__dirname, '..', 'addon');
+const WHISPER_CLI = path.join(ADDON_ROOT, 'whisper-blas-bin-x64', 'Release', 'whisper-cli.exe');
+const WHISPER_MODEL = path.join(ADDON_ROOT, 'ggml-base.en.bin');
 
 // Persist config (including API keys) to a JSON file in Electron's userData dir.
 // API-key values are encrypted with safeStorage (OS keychain: DPAPI on Windows)
@@ -104,13 +108,15 @@ let currentPassthrough = true; // what the window is actually in right now
 let cursorPollTimer = null;
 
 function createOverlay() {
-  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+  // Use `workArea` (not `workAreaSize`) so the display's x/y offset is included —
+  // otherwise multi-monitor setups or side-docked taskbars mis-center the window.
+  const wa = screen.getPrimaryDisplay().workArea;
 
   overlay = new BrowserWindow({
     width: WIN_W,
     height: WIN_H,
-    x: Math.round((width - WIN_W) / 2),
-    y: Math.round((height - WIN_H) / 2),
+    x: wa.x + Math.round((wa.width - WIN_W) / 2),
+    y: wa.y + Math.round((wa.height - WIN_H) / 2),
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -230,11 +236,17 @@ function registerHotkeys() {
   tryRegister('CommandOrControl+Shift+]', () => overlay?.webContents.send('opacity-delta', +0.05));
   tryRegister('CommandOrControl+Shift+[', () => overlay?.webContents.send('opacity-delta', -0.05));
 
+  // Emergency quit — works even when window is hidden or click-through
+  tryRegister('CommandOrControl+Shift+Q', () => {
+    console.log('[quit] Ctrl+Shift+Q pressed, quitting');
+    app.quit();
+  });
+
   tryRegister('CommandOrControl+Alt+C', () => {
     if (!overlay) return;
-    const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+    const wa = screen.getPrimaryDisplay().workArea;
     const [w, h] = overlay.getSize();
-    overlay.setPosition(Math.round((width - w) / 2), Math.round((height - h) / 2));
+    overlay.setPosition(wa.x + Math.round((wa.width - w) / 2), wa.y + Math.round((wa.height - h) / 2));
     showOverlay();
   });
 }

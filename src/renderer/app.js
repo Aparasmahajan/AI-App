@@ -3,18 +3,27 @@
 // so this file no longer touches setIgnoreMouseEvents.
 
 const DEFAULTS = {
-  provider: 'ollama', // 'ollama' | 'groq' | 'openai' | 'openrouter' | 'gemini' | 'custom'
+  provider: 'groq',   // 'ollama' | 'groq' | 'openai' | 'openrouter' | 'gemini' | 'custom'
   apiKeys: {},        // per-provider keys: { groq: '...', openai: '...', gemini: '...', ... }
   apiBase: '',        // only used for 'custom'; other providers are hardcoded
   ollamaUrl: 'http://127.0.0.1:11434',
   whisperUrl: 'http://127.0.0.1:9000/inference',
-  model: 'llama3.2:3b',
-  systemPrompt: 'You are a concise study/teaching assistant master of JAVA, SQL, DSA, System Design and Kafka. Give a direct, correct and human like answer not bookish one. Also be ware to give a crisp a consise answer along with summary at last. For coding question add an understandable comments too where ever required.',
+  model: 'llama-3.3-70b-versatile',
+  systemPrompt: 'You are a concise study/teaching assistant master of JAVA, SQL, DSA, System Design and Kafka. Give a direct, correct and human like answer not bookish one. Also be ware to give a crisp a concise answer along with summary at last. For coding question add an understandable comments too where ever required. Give answer such that i can see easily during quick fire round. when ever i ask for eg or anything just make sure to check previous prompt too.',
   fontScale: 1,
   appOpacity: 0.82,
   maxTokens: 400,
-  contextChars: 1200,
+  contextChars: 2000,
   layout: 'cards',
+  scrollMode: 'medium',   // 'line' | 'slow' | 'medium' | 'fast'
+};
+
+// Pixels-per-second for each paced scroll mode. `fast` = snap.
+const SCROLL_SPEEDS = {
+  line:   20,   // ~1 line/sec at default font
+  slow:   80,   // ~4 lines/sec
+  medium: 250,  // ~12 lines/sec
+  fast:   Infinity,
 };
 
 // Provider registry. Everything except gemini uses OpenAI-compatible /chat/completions.
@@ -119,6 +128,7 @@ const els = {
   cfgTokens: document.getElementById('cfg-tokens'),
   cfgCtx: document.getElementById('cfg-ctx'),
   cfgLayout: document.getElementById('cfg-layout'),
+  cfgScroll: document.getElementById('cfg-scroll'),
   transcriptWrap: document.getElementById('transcript-wrap'),
   transcript: document.getElementById('transcript'),
   txClear: document.getElementById('tx-clear'),
@@ -293,6 +303,54 @@ let generating = false;
 let collapsed = false;
 let transcribeErrorShown = false; // only warn about whisper once per session
 
+// ---------- Custom dropdowns (native <select> popups bypass content protection) ----------
+function enhanceSelect(sel) {
+  const wrap = document.createElement('div');
+  wrap.className = 'dd-wrap';
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'dd-trigger';
+  const panel = document.createElement('div');
+  panel.className = 'dd-panel';
+  panel.hidden = true;
+  wrap.appendChild(trigger);
+  wrap.appendChild(panel);
+  sel.parentNode.insertBefore(wrap, sel);
+
+  function render() {
+    trigger.textContent = sel.options[sel.selectedIndex]?.textContent || '(select…)';
+    panel.innerHTML = '';
+    for (const opt of Array.from(sel.options)) {
+      const item = document.createElement('div');
+      item.className = 'dd-item' + (opt.value === sel.value ? ' selected' : '');
+      item.textContent = opt.textContent;
+      item.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        sel.value = opt.value;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        panel.hidden = true;
+        render();
+      });
+      panel.appendChild(item);
+    }
+  }
+
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // Close any other open dd panels
+    document.querySelectorAll('.dd-panel').forEach((p) => { if (p !== panel) p.hidden = true; });
+    panel.hidden = !panel.hidden;
+  });
+  document.addEventListener('click', () => { panel.hidden = true; });
+
+  // Watch for changes made programmatically (populateModels, etc.)
+  new MutationObserver(render).observe(sel, { childList: true, attributes: true, subtree: true });
+  render();
+}
+
+// Kill the right-click context menu — it also opens as a native OS popup.
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+
 // ---------- Config ----------
 // Primary source of truth: JSON file in Electron's userData dir (via main process).
 // LocalStorage is kept as a fallback for legacy installs but the file wins on read.
@@ -420,6 +478,7 @@ els.cfgSave.addEventListener('click', async () => {
     maxTokens: parseInt(els.cfgTokens.value, 10) || DEFAULTS.maxTokens,
     contextChars: parseInt(els.cfgCtx.value, 10) || DEFAULTS.contextChars,
     layout: els.cfgLayout.value || DEFAULTS.layout,
+    scrollMode: els.cfgScroll.value || DEFAULTS.scrollMode,
   });
   transcribeErrorShown = false; // re-arm the whisper warning for new URL
   setStatus(ok ? 'saved to disk' : 'save failed — see terminal');
@@ -447,6 +506,7 @@ function hydrateSettings() {
   els.cfgTokens.value = String(cfg.maxTokens);
   els.cfgCtx.value = String(cfg.contextChars);
   els.cfgLayout.value = cfg.layout;
+  els.cfgScroll.value = cfg.scrollMode;
   els.cfgModelText.value = cfg.model;
   populateModels();
 }
@@ -499,6 +559,9 @@ async function populateModels() {
 els.cfgModel.addEventListener('change', () => {
   if (els.cfgModel.value) els.cfgModelText.value = els.cfgModel.value;
 });
+
+// Wrap every native <select> with a custom dropdown that renders inside the window.
+[els.cfgProvider, els.cfgTokens, els.cfgCtx, els.cfgLayout, els.cfgScroll, els.cfgModel].forEach(enhanceSelect);
 
 // ---------- Cancel — always resets state ----------
 function cancelAll() {
@@ -929,16 +992,106 @@ els.search.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); stepMatch(e.shiftKey ? -1 : +1); }
 });
 
-// Auto-scroll
+// Paced auto-scroll — advances scrollTop at a configured pixels-per-second rate
+// so text streaming faster than a human can read doesn't rocket past you.
+// The rAF loop runs continuously while there's a scroll debt, so token bursts
+// coalesce into smooth motion at the chosen speed.
 let userScrolledUp = false;
-function scrollToBottom() { els.answer.scrollTop = els.answer.scrollHeight; }
+let scrollRafId = null;
+let lastScrollT = 0;
+
+function scheduleScroll() {
+  if (scrollRafId !== null || userScrolledUp) return;
+  lastScrollT = performance.now();
+  const step = (t) => {
+    scrollRafId = null;
+    if (userScrolledUp) return;
+    const target = els.answer.scrollHeight - els.answer.clientHeight;
+    const cur = els.answer.scrollTop;
+    const remaining = target - cur;
+    if (remaining <= 0.5) return; // caught up — stop the loop
+    const pxPerSec = SCROLL_SPEEDS[cfg.scrollMode] ?? SCROLL_SPEEDS.medium;
+    if (pxPerSec === Infinity) {
+      els.answer.scrollTop = target;
+      return;
+    }
+    const dt = Math.max(0, (t - lastScrollT) / 1000);
+    lastScrollT = t;
+    const advance = Math.min(remaining, pxPerSec * dt);
+    els.answer.scrollTop = cur + advance;
+    scrollRafId = requestAnimationFrame(step);
+  };
+  scrollRafId = requestAnimationFrame(step);
+}
+function scrollToBottom() { scheduleScroll(); }
 function updateScrollLock() {
   const nearBottom = els.answer.scrollTop + els.answer.clientHeight >= els.answer.scrollHeight - 24;
   userScrolledUp = !nearBottom;
 }
 els.answer.addEventListener('wheel', () => setTimeout(updateScrollLock, 0));
+
+// Click anywhere in the answer area (not on a button / link) → focus it so
+// keyboard scroll works. This applies whether we're click-through or interactive.
+els.answer.addEventListener('mousedown', (e) => {
+  if (e.target.closest('button, a, input, textarea, select')) return;
+  els.answer.focus();
+});
+
+// Global keydown — arrow / PageUp / PageDown / Home / End scroll the answer
+// regardless of which part of the app has focus (title bar, empty area, etc.).
+// We skip it when the user is typing in an input, textarea, or select.
+document.addEventListener('keydown', (e) => {
+  const t = e.target;
+  const inField = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+
+  // Chrome-style "/" shortcut — focus the Ask input from anywhere (except while typing).
+  if (!inField && e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    els.prompt.focus();
+    els.prompt.select();
+    return;
+  }
+
+  if (inField) return;
+  // If the answer already has focus its own handler will run — don't double-scroll.
+  if (document.activeElement === els.answer) return;
+  const step = 40;
+  const page = els.answer.clientHeight * 0.9;
+  let handled = true;
+  switch (e.key) {
+    case 'ArrowDown': els.answer.scrollTop += step; break;
+    case 'ArrowUp':   els.answer.scrollTop -= step; break;
+    case 'PageDown':  els.answer.scrollTop += page; break;
+    case 'PageUp':    els.answer.scrollTop -= page; break;
+    case 'Home':      els.answer.scrollTop = 0; break;
+    case 'End':       els.answer.scrollTop = els.answer.scrollHeight; break;
+    default: handled = false;
+  }
+  if (handled) {
+    e.preventDefault();
+    setTimeout(updateScrollLock, 0);
+  }
+});
+
+// Arrow / PageUp / PageDown / Home / End → scroll the answer panel manually.
+// Doing it explicitly (not relying on native tabindex scroll) so it works
+// consistently and updates our own userScrolledUp lock.
 els.answer.addEventListener('keydown', (e) => {
-  if (['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '].includes(e.key)) {
+  const step = 40;
+  const page = els.answer.clientHeight * 0.9;
+  let handled = true;
+  switch (e.key) {
+    case 'ArrowDown': els.answer.scrollTop += step; break;
+    case 'ArrowUp':   els.answer.scrollTop -= step; break;
+    case 'PageDown':  els.answer.scrollTop += page; break;
+    case 'PageUp':    els.answer.scrollTop -= page; break;
+    case 'Home':      els.answer.scrollTop = 0; break;
+    case 'End':       els.answer.scrollTop = els.answer.scrollHeight; break;
+    case ' ':         els.answer.scrollTop += e.shiftKey ? -page : page; break;
+    default: handled = false;
+  }
+  if (handled) {
+    e.preventDefault();
     setTimeout(updateScrollLock, 0);
   }
 });
