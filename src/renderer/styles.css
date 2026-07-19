@@ -179,6 +179,7 @@ body { padding: 6px; }
   padding: 0 16px;
   overflow-y: auto;
   min-height: 0;
+  outline: none; /* hide the default focus ring — focus is used for keyboard scroll */
 }
 #answer-body { padding: 12px 0; }
 #answer-body.placeholder { padding: 12px 0; }

@@ -1029,8 +1029,69 @@ function updateScrollLock() {
   userScrolledUp = !nearBottom;
 }
 els.answer.addEventListener('wheel', () => setTimeout(updateScrollLock, 0));
+
+// Click anywhere in the answer area (not on a button / link) → focus it so
+// keyboard scroll works. This applies whether we're click-through or interactive.
+els.answer.addEventListener('mousedown', (e) => {
+  if (e.target.closest('button, a, input, textarea, select')) return;
+  els.answer.focus();
+});
+
+// Global keydown — arrow / PageUp / PageDown / Home / End scroll the answer
+// regardless of which part of the app has focus (title bar, empty area, etc.).
+// We skip it when the user is typing in an input, textarea, or select.
+document.addEventListener('keydown', (e) => {
+  const t = e.target;
+  const inField = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+
+  // Chrome-style "/" shortcut — focus the Ask input from anywhere (except while typing).
+  if (!inField && e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    els.prompt.focus();
+    els.prompt.select();
+    return;
+  }
+
+  if (inField) return;
+  // If the answer already has focus its own handler will run — don't double-scroll.
+  if (document.activeElement === els.answer) return;
+  const step = 40;
+  const page = els.answer.clientHeight * 0.9;
+  let handled = true;
+  switch (e.key) {
+    case 'ArrowDown': els.answer.scrollTop += step; break;
+    case 'ArrowUp':   els.answer.scrollTop -= step; break;
+    case 'PageDown':  els.answer.scrollTop += page; break;
+    case 'PageUp':    els.answer.scrollTop -= page; break;
+    case 'Home':      els.answer.scrollTop = 0; break;
+    case 'End':       els.answer.scrollTop = els.answer.scrollHeight; break;
+    default: handled = false;
+  }
+  if (handled) {
+    e.preventDefault();
+    setTimeout(updateScrollLock, 0);
+  }
+});
+
+// Arrow / PageUp / PageDown / Home / End → scroll the answer panel manually.
+// Doing it explicitly (not relying on native tabindex scroll) so it works
+// consistently and updates our own userScrolledUp lock.
 els.answer.addEventListener('keydown', (e) => {
-  if (['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '].includes(e.key)) {
+  const step = 40;
+  const page = els.answer.clientHeight * 0.9;
+  let handled = true;
+  switch (e.key) {
+    case 'ArrowDown': els.answer.scrollTop += step; break;
+    case 'ArrowUp':   els.answer.scrollTop -= step; break;
+    case 'PageDown':  els.answer.scrollTop += page; break;
+    case 'PageUp':    els.answer.scrollTop -= page; break;
+    case 'Home':      els.answer.scrollTop = 0; break;
+    case 'End':       els.answer.scrollTop = els.answer.scrollHeight; break;
+    case ' ':         els.answer.scrollTop += e.shiftKey ? -page : page; break;
+    default: handled = false;
+  }
+  if (handled) {
+    e.preventDefault();
     setTimeout(updateScrollLock, 0);
   }
 });
