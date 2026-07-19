@@ -3,15 +3,78 @@
 // so this file no longer touches setIgnoreMouseEvents.
 
 const DEFAULTS = {
+  provider: 'ollama', // 'ollama' | 'groq' | 'openai' | 'openrouter' | 'gemini' | 'custom'
+  apiKeys: {},        // per-provider keys: { groq: '...', openai: '...', gemini: '...', ... }
+  apiBase: '',        // only used for 'custom'; other providers are hardcoded
   ollamaUrl: 'http://127.0.0.1:11434',
   whisperUrl: 'http://127.0.0.1:9000/inference',
   model: 'llama3.2:3b',
   systemPrompt: 'You are a concise study/teaching assistant master of JAVA, SQL, DSA, System Design and Kafka. Give a direct, correct and human like answer not bookish one. Also be ware to give a crisp a consise answer along with summary at last. For coding question add an understandable comments too where ever required.',
   fontScale: 1,
   appOpacity: 0.82,
-  maxTokens: 400,     // cap on answer length; smaller = faster on CPU
-  contextChars: 1200, // per section (transcript, screen); smaller = faster
-  layout: 'cards',    // 'cards' | 'bubbles'
+  maxTokens: 400,
+  contextChars: 1200,
+  layout: 'cards',
+};
+
+// Provider registry. Everything except gemini uses OpenAI-compatible /chat/completions.
+// `models` = curated recommended list for each provider. User can still type any model id.
+const PROVIDERS = {
+  ollama: {
+    label: 'Ollama (local)', needsKey: false, defaultModel: 'llama3.2:3b',
+    // Ollama models are auto-loaded from local `ollama list`; this fallback is used only if none pulled.
+    models: ['llama3.2:3b', 'llama3.2:1b', 'qwen2.5:3b', 'phi3:mini', 'gemma2:2b'],
+  },
+  groq: {
+    label: 'Groq (fast + free)', needsKey: true, base: 'https://api.groq.com/openai/v1',
+    defaultModel: 'llama-3.3-70b-versatile',
+    models: [
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant',
+      'llama3-70b-8192',
+      'llama3-8b-8192',
+      'qwen-2.5-32b',
+      'qwen-2.5-coder-32b',
+      'deepseek-r1-distill-llama-70b',
+      'mixtral-8x7b-32768',
+      'gemma2-9b-it',
+    ],
+  },
+  openai: {
+    label: 'OpenAI', needsKey: true, base: 'https://api.openai.com/v1',
+    defaultModel: 'gpt-4o-mini',
+    models: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1', 'o4-mini', 'o3-mini', 'gpt-3.5-turbo'],
+  },
+  openrouter: {
+    label: 'OpenRouter', needsKey: true, base: 'https://openrouter.ai/api/v1',
+    defaultModel: 'meta-llama/llama-3.3-70b-instruct:free',
+    models: [
+      'meta-llama/llama-3.3-70b-instruct:free',
+      'deepseek/deepseek-r1:free',
+      'deepseek/deepseek-chat:free',
+      'google/gemini-2.0-flash-exp:free',
+      'qwen/qwen-2.5-72b-instruct:free',
+      'mistralai/mistral-7b-instruct:free',
+      'anthropic/claude-3.5-sonnet',
+      'openai/gpt-4o-mini',
+    ],
+  },
+  gemini: {
+    label: 'Google Gemini (free)', needsKey: true, base: 'https://generativelanguage.googleapis.com/v1beta',
+    defaultModel: 'gemini-2.0-flash',
+    models: [
+      'gemini-2.0-flash',
+      'gemini-2.0-flash-lite',
+      'gemini-1.5-flash',
+      'gemini-1.5-flash-8b',
+      'gemini-1.5-pro',
+      'gemini-exp-1206',
+    ],
+  },
+  custom: {
+    label: 'Custom OpenAI-compat', needsKey: true, defaultModel: '',
+    models: [],
+  },
 };
 
 const OCR_MAX_WIDTH = 1280;
@@ -28,6 +91,10 @@ const els = {
   historyCount: document.getElementById('history-count'),
   clearAll: document.getElementById('clear-all'),
   search: document.getElementById('search'),
+  matchNav: document.getElementById('match-nav'),
+  matchCount: document.getElementById('match-count'),
+  matchPrev: document.getElementById('match-prev'),
+  matchNext: document.getElementById('match-next'),
   prompt: document.getElementById('prompt'),
   send: document.getElementById('send'),
   mode: document.getElementById('mode'),
@@ -36,7 +103,12 @@ const els = {
   gear: document.getElementById('gear'),
   collapse: document.getElementById('collapse'),
   settings: document.getElementById('settings'),
+  cfgProvider: document.getElementById('cfg-provider'),
+  cfgApiKey: document.getElementById('cfg-apikey'),
+  cfgApiBase: document.getElementById('cfg-apibase'),
+  cfgApiBaseRow: document.getElementById('cfg-apibase-row'),
   cfgModel: document.getElementById('cfg-model'),
+  cfgModelText: document.getElementById('cfg-model-text'),
   cfgRefresh: document.getElementById('cfg-refresh'),
   cfgSystem: document.getElementById('cfg-system'),
   cfgOllama: document.getElementById('cfg-ollama'),
@@ -222,14 +294,29 @@ let collapsed = false;
 let transcribeErrorShown = false; // only warn about whisper once per session
 
 // ---------- Config ----------
+// Primary source of truth: JSON file in Electron's userData dir (via main process).
+// LocalStorage is kept as a fallback for legacy installs but the file wins on read.
 function loadConfig() {
-  try { return { ...DEFAULTS, ...(JSON.parse(localStorage.getItem('cfg') || '{}')) }; }
-  catch { return { ...DEFAULTS }; }
+  const fromDisk = window.api.getInitialConfig() || {};
+  let fromLocal = {};
+  try { fromLocal = JSON.parse(localStorage.getItem('cfg') || '{}'); } catch {}
+  const merged = { ...DEFAULTS, ...fromLocal, ...fromDisk };
+  // Migrate legacy single `apiKey` field into the per-provider map.
+  if (merged.apiKey && (!merged.apiKeys || !merged.apiKeys[merged.provider])) {
+    merged.apiKeys = { ...(merged.apiKeys || {}), [merged.provider]: merged.apiKey };
+  }
+  delete merged.apiKey; // don't persist the legacy field going forward
+  merged.apiKeys = merged.apiKeys || {};
+  return merged;
 }
 let cfg = loadConfig();
-function saveConfig(next) {
+function currentApiKey() { return cfg.apiKeys?.[cfg.provider] || ''; }
+async function saveConfig(next) {
   cfg = { ...cfg, ...next };
-  localStorage.setItem('cfg', JSON.stringify(cfg));
+  localStorage.setItem('cfg', JSON.stringify(cfg));   // legacy mirror
+  const ok = await window.api.persistConfig(cfg);      // authoritative on-disk copy
+  if (!ok) console.warn('[config] persist returned false — check terminal for reason');
+  return ok;
 }
 function applyVisualConfig() {
   document.documentElement.style.setProperty('--font-scale', cfg.fontScale);
@@ -237,18 +324,17 @@ function applyVisualConfig() {
 }
 applyVisualConfig();
 
-// Warm up the model so the first real question doesn't pay the 10-30s cold-load cost.
+// Warm up the local model so the first Ollama request doesn't pay cold-load cost.
+// No-op for cloud providers (they're always warm).
 async function warmModel() {
+  if (cfg.provider !== 'ollama') return;
   try {
     await fetch(`${cfg.ollamaUrl.replace(/\/$/, '')}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: cfg.model,
-        prompt: 'hi',
-        stream: false,
-        keep_alive: '30m',
-        options: { num_predict: 1 },
+        model: cfg.model, prompt: 'hi', stream: false,
+        keep_alive: '30m', options: { num_predict: 1 },
       }),
     });
   } catch (e) { console.warn('model warmup failed:', e.message); }
@@ -318,20 +404,27 @@ els.cfgTest.addEventListener('click', async () => {
   else setStatus(`whisper: ${r.error}`, false);
   setTimeout(() => setStatus(''), 4000);
 });
-els.cfgSave.addEventListener('click', () => {
-  saveConfig({
+els.cfgSave.addEventListener('click', async () => {
+  // Prefer the text-entered model over the dropdown selection (lets you type any model id).
+  const modelValue = els.cfgModelText.value.trim() || els.cfgModel.value || DEFAULTS.model;
+  const selectedProvider = els.cfgProvider.value || DEFAULTS.provider;
+  const nextKeys = { ...(cfg.apiKeys || {}), [selectedProvider]: els.cfgApiKey.value };
+  const ok = await saveConfig({
+    provider: selectedProvider,
+    apiKeys: nextKeys,
+    apiBase: els.cfgApiBase.value.trim(),
     ollamaUrl: els.cfgOllama.value.trim() || DEFAULTS.ollamaUrl,
     whisperUrl: els.cfgWhisper.value.trim() || DEFAULTS.whisperUrl,
-    model: els.cfgModel.value || DEFAULTS.model,
+    model: modelValue,
     systemPrompt: els.cfgSystem.value.trim() || DEFAULTS.systemPrompt,
     maxTokens: parseInt(els.cfgTokens.value, 10) || DEFAULTS.maxTokens,
     contextChars: parseInt(els.cfgCtx.value, 10) || DEFAULTS.contextChars,
     layout: els.cfgLayout.value || DEFAULTS.layout,
   });
   transcribeErrorShown = false; // re-arm the whisper warning for new URL
-  setStatus('saved');
-  setTimeout(() => setStatus(''), 1200);
-  els.settings.hidden = true;
+  setStatus(ok ? 'saved to disk' : 'save failed — see terminal');
+  setTimeout(() => setStatus(''), 1500);
+  if (ok) els.settings.hidden = true;
   warmModel(); // pre-load the (possibly new) model
 });
 els.cfgReset.addEventListener('click', () => {
@@ -343,14 +436,32 @@ els.cfgReset.addEventListener('click', () => {
 });
 
 function hydrateSettings() {
+  els.cfgProvider.value = cfg.provider;
+  els.cfgApiKey.value = currentApiKey();
+  els.cfgApiKey.placeholder = `paste ${PROVIDERS[cfg.provider]?.label || cfg.provider} key`;
+  els.cfgApiBase.value = cfg.apiBase;
+  els.cfgApiBaseRow.hidden = cfg.provider !== 'custom';
   els.cfgOllama.value = cfg.ollamaUrl;
   els.cfgWhisper.value = cfg.whisperUrl;
   els.cfgSystem.value = cfg.systemPrompt;
   els.cfgTokens.value = String(cfg.maxTokens);
   els.cfgCtx.value = String(cfg.contextChars);
   els.cfgLayout.value = cfg.layout;
+  els.cfgModelText.value = cfg.model;
   populateModels();
 }
+
+// Show/hide custom base URL row when provider changes; pre-fill default model,
+// swap the API key input to that provider's saved key, refresh model dropdown.
+els.cfgProvider.addEventListener('change', () => {
+  const p = els.cfgProvider.value;
+  els.cfgApiBaseRow.hidden = p !== 'custom';
+  const def = PROVIDERS[p]?.defaultModel;
+  if (def) els.cfgModelText.value = def;
+  els.cfgApiKey.value = cfg.apiKeys?.[p] || '';
+  els.cfgApiKey.placeholder = `paste ${PROVIDERS[p]?.label || p} key`;
+  populateModels();
+});
 
 // Live layout switch — re-renders instantly, no need to Save.
 els.cfgLayout && els.cfgLayout.addEventListener('change', () => {
@@ -361,11 +472,21 @@ els.cfgLayout && els.cfgLayout.addEventListener('change', () => {
 // Apply layout class on load
 document.body.classList.toggle('layout-bubbles', cfg.layout === 'bubbles');
 async function populateModels() {
-  els.cfgModel.innerHTML = '<option>loading...</option>';
-  const list = await window.api.listOllamaModels();
+  const provider = els.cfgProvider.value || cfg.provider;
+  let models;
+  if (provider === 'ollama') {
+    els.cfgModel.innerHTML = '<option>loading...</option>';
+    const list = await window.api.listOllamaModels();
+    models = list.length ? list : (PROVIDERS.ollama.models || [cfg.model]);
+  } else {
+    models = PROVIDERS[provider]?.models || [];
+  }
   els.cfgModel.innerHTML = '';
-  const models = list.length ? list : [cfg.model];
-  if (!models.includes(cfg.model)) models.unshift(cfg.model);
+  if (!models.length) {
+    els.cfgModel.innerHTML = '<option value="">(type model id →)</option>';
+    return;
+  }
+  if (!models.includes(cfg.model)) models = [cfg.model, ...models].filter(Boolean);
   for (const m of models) {
     const opt = document.createElement('option');
     opt.value = m; opt.textContent = m;
@@ -373,6 +494,11 @@ async function populateModels() {
     els.cfgModel.appendChild(opt);
   }
 }
+
+// Picking from the dropdown fills the text input so you can see / edit / save what you picked.
+els.cfgModel.addEventListener('change', () => {
+  if (els.cfgModel.value) els.cfgModelText.value = els.cfgModel.value;
+});
 
 // ---------- Cancel — always resets state ----------
 function cancelAll() {
@@ -384,13 +510,25 @@ function cancelAll() {
 }
 
 // ---------- LLM ----------
-async function askOllama(userPrompt, extraContext, onToken, signal) {
-  const ctxParts = [
+function buildContext(userPrompt, extraContext) {
+  const parts = [
     transcriptBuffer && `# Recent conversation transcript\n${transcriptBuffer.slice(-cfg.contextChars)}`,
     extraContext && `# On-screen text\n${extraContext.slice(-cfg.contextChars)}`,
   ].filter(Boolean).join('\n\n');
-  const fullPrompt = `${cfg.systemPrompt}\n\n${ctxParts}\n\n# Question\n${userPrompt}\n\n# Answer`;
+  return { userMessage: parts ? `${parts}\n\n# Question\n${userPrompt}` : userPrompt };
+}
 
+// Router — dispatches to the right adapter based on cfg.provider.
+async function askAI(userPrompt, extraContext, onToken, signal) {
+  const p = cfg.provider;
+  if (p === 'ollama') return askOllama(userPrompt, extraContext, onToken, signal);
+  if (p === 'gemini') return askGemini(userPrompt, extraContext, onToken, signal);
+  return askOpenAICompat(p, userPrompt, extraContext, onToken, signal);
+}
+
+async function askOllama(userPrompt, extraContext, onToken, signal) {
+  const { userMessage } = buildContext(userPrompt, extraContext);
+  const fullPrompt = `${cfg.systemPrompt}\n\n${userMessage}\n\n# Answer`;
   const res = await fetch(`${cfg.ollamaUrl.replace(/\/$/, '')}/api/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -398,19 +536,12 @@ async function askOllama(userPrompt, extraContext, onToken, signal) {
       model: cfg.model,
       prompt: fullPrompt,
       stream: true,
-      keep_alive: '30m', // keep the model resident so subsequent calls skip disk load
-      options: {
-        num_predict: cfg.maxTokens,  // cap answer length (biggest speedup on CPU)
-        num_ctx: 2048,               // context window; larger uses more RAM/CPU
-        temperature: 0.3,
-        top_k: 40,
-        top_p: 0.9,
-      },
+      keep_alive: '30m',
+      options: { num_predict: cfg.maxTokens, num_ctx: 2048, temperature: 0.3, top_k: 40, top_p: 0.9 },
     }),
     signal,
   });
   if (!res.ok) throw new Error(`Ollama HTTP ${res.status} — is 'ollama serve' running and '${cfg.model}' pulled?`);
-
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let full = '', buf = '';
@@ -423,6 +554,106 @@ async function askOllama(userPrompt, extraContext, onToken, signal) {
     for (const line of lines) {
       if (!line.trim()) continue;
       try { const j = JSON.parse(line); if (j.response) { full += j.response; onToken(full); } } catch {}
+    }
+  }
+  return full;
+}
+
+// OpenAI-compatible: Groq, OpenAI, OpenRouter, custom. All use /chat/completions with SSE.
+async function askOpenAICompat(provider, userPrompt, extraContext, onToken, signal) {
+  const meta = PROVIDERS[provider] || {};
+  const base = (provider === 'custom' ? cfg.apiBase : meta.base) || '';
+  if (!base) throw new Error(`No API base URL configured for ${provider}`);
+  const key = currentApiKey();
+  if (!key) throw new Error(`API key missing — open ⚙ and paste your ${meta.label || provider} key`);
+
+  const { userMessage } = buildContext(userPrompt, extraContext);
+  const res = await fetch(`${base.replace(/\/$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      model: cfg.model,
+      messages: [
+        { role: 'system', content: cfg.systemPrompt },
+        { role: 'user', content: userMessage },
+      ],
+      max_tokens: cfg.maxTokens,
+      temperature: 0.3,
+      stream: true,
+    }),
+    signal,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`${meta.label || provider} HTTP ${res.status} — ${body.slice(0, 200)}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let full = '', buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const payload = trimmed.slice(5).trim();
+      if (payload === '[DONE]') return full;
+      try {
+        const j = JSON.parse(payload);
+        const delta = j.choices?.[0]?.delta?.content;
+        if (delta) { full += delta; onToken(full); }
+      } catch {}
+    }
+  }
+  return full;
+}
+
+// Google Gemini — different API shape. Streams via streamGenerateContent SSE.
+async function askGemini(userPrompt, extraContext, onToken, signal) {
+  const key = currentApiKey();
+  if (!key) throw new Error('API key missing — open ⚙ and paste your Gemini key');
+  const { userMessage } = buildContext(userPrompt, extraContext);
+  const base = PROVIDERS.gemini.base;
+  const url = `${base}/models/${encodeURIComponent(cfg.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(key)}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { role: 'system', parts: [{ text: cfg.systemPrompt }] },
+      contents: [{ role: 'user', parts: [{ text: userMessage }] }],
+      generationConfig: { maxOutputTokens: cfg.maxTokens, temperature: 0.3 },
+    }),
+    signal,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Gemini HTTP ${res.status} — ${body.slice(0, 200)}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let full = '', buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const payload = trimmed.slice(5).trim();
+      try {
+        const j = JSON.parse(payload);
+        const delta = j.candidates?.[0]?.content?.parts?.map((p) => p.text).join('');
+        if (delta) { full += delta; onToken(full); }
+      } catch {}
     }
   }
   return full;
@@ -571,6 +802,7 @@ function renderHistory() {
   const renderer = cfg.layout === 'bubbles' ? renderBubble : renderCard;
   els.answerBody.innerHTML = history.map(renderer).join('');
   updateHistoryCount();
+  refreshMatches();
   els.historyHeader.hidden = false;
 
   // Re-bind per-card action buttons (innerHTML wipes listeners each render)
@@ -637,6 +869,7 @@ function applySearch() {
 // Search — filter cards by keyword. Source filter comes from chip or `typed:` prefix.
 els.search.addEventListener('input', () => {
   searchQuery = els.search.value;
+  currentMatchIdx = 0; // jump to first match on new query
   applySearch();
 });
 els.search.addEventListener('keydown', (e) => {
@@ -656,6 +889,45 @@ function updateHistoryCount() {
   const visible = history.filter(entryMatchesSearch).length;
   els.historyCount.textContent = (searchQuery ? `${visible}/${history.length}` : history.length);
 }
+
+// ---------- Chrome-style match navigation (Enter / Shift+Enter / ↑ ↓) ----------
+let matchElements = [];
+let currentMatchIdx = -1;
+
+function refreshMatches() {
+  matchElements = Array.from(els.answerBody.querySelectorAll('mark'));
+  if (!matchElements.length) {
+    els.matchNav.hidden = true;
+    currentMatchIdx = -1;
+    return;
+  }
+  els.matchNav.hidden = false;
+  if (currentMatchIdx >= matchElements.length || currentMatchIdx < 0) currentMatchIdx = 0;
+  highlightCurrent();
+}
+
+function highlightCurrent() {
+  matchElements.forEach((m, i) => m.classList.toggle('current', i === currentMatchIdx));
+  els.matchCount.textContent = `${currentMatchIdx + 1}/${matchElements.length}`;
+  const cur = matchElements[currentMatchIdx];
+  if (cur) cur.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  els.matchPrev.disabled = matchElements.length < 2;
+  els.matchNext.disabled = matchElements.length < 2;
+}
+
+function stepMatch(delta) {
+  if (!matchElements.length) return;
+  currentMatchIdx = (currentMatchIdx + delta + matchElements.length) % matchElements.length;
+  highlightCurrent();
+}
+
+els.matchNext.addEventListener('click', () => stepMatch(+1));
+els.matchPrev.addEventListener('click', () => stepMatch(-1));
+
+// Enter in search box → next match; Shift+Enter → previous.
+els.search.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); stepMatch(e.shiftKey ? -1 : +1); }
+});
 
 // Auto-scroll
 let userScrolledUp = false;
@@ -679,7 +951,7 @@ async function ask(userPrompt, source, extraContext = '') {
   startEntry(source, userPrompt);
   setStatus('thinking', true);
   try {
-    await askOllama(userPrompt, extraContext, updateStreamingAnswer, currentAbort.signal);
+    await askAI(userPrompt, extraContext, updateStreamingAnswer, currentAbort.signal);
     finishEntry();
     setStatus('done'); setTimeout(() => setStatus(''), 1000);
   } catch (e) {
@@ -746,7 +1018,7 @@ async function askAboutScreen() {
     if (signal.aborted) { finishEntry(); return; }
 
     setStatus('thinking', true);
-    await askOllama(q, text, updateStreamingAnswer, signal);
+    await askAI(q, text, updateStreamingAnswer, signal);
     finishEntry();
     setStatus('done'); setTimeout(() => setStatus(''), 1000);
   } catch (e) {

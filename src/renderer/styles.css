@@ -96,6 +96,12 @@ body { padding: 6px; }
   width: 100%;
   resize: vertical;
 }
+/* Chromium renders <option> using OS defaults — force dark theme so the
+   dropdown itself isn't a bright white flash. */
+.settings-row select option, .settings-row select optgroup {
+  background: #1a1c22;
+  color: #e6e6e6;
+}
 #cfg-refresh, #cfg-test {
   background: rgba(255,255,255,0.08);
   color: #ccc;
@@ -198,6 +204,35 @@ mark {
   padding: 0 1px;
   border-radius: 2px;
 }
+mark.current {
+  background: #ffb347;
+  color: #1a1c22;
+  outline: 1px solid #ff8c00;
+}
+
+#match-nav {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: #999;
+}
+#match-count {
+  min-width: 40px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+#match-prev, #match-next {
+  background: rgba(255,255,255,0.06);
+  color: #ccc;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 11px;
+  line-height: 1;
+}
+#match-prev:hover, #match-next:hover { background: rgba(74,140,255,0.25); color: #7ab0ff; }
+#match-prev:disabled, #match-next:disabled { opacity: 0.3; }
 #clear-all {
   background: transparent;
   color: #666;
