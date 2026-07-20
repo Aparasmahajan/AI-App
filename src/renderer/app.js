@@ -615,6 +615,16 @@ els.cfgTheme.addEventListener('change', () => {
   document.documentElement.setAttribute('data-theme', els.cfgTheme.value);
 });
 
+// Sync every <select>'s displayed value to what cfg says, BEFORE wrapping —
+// otherwise the custom-dropdown trigger reads the HTML default (first option)
+// instead of the user's saved / pinned value.
+els.cfgProvider.value = cfg.provider;
+els.cfgTokens.value = String(cfg.maxTokens);
+els.cfgCtx.value = String(cfg.contextChars);
+els.cfgLayout.value = cfg.layout;
+els.cfgScroll.value = cfg.scrollMode;
+els.cfgTheme.value = cfg.theme;
+
 // Wrap every native <select> with a custom dropdown that renders inside the window.
 [els.cfgProvider, els.cfgTokens, els.cfgCtx, els.cfgLayout, els.cfgScroll, els.cfgTheme, els.cfgModel].forEach(enhanceSelect);
 
