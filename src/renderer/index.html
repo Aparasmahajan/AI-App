@@ -13,6 +13,13 @@
         <span id="mode" class="pill dim">click-through</span>
         <span id="listen" class="pill dim">idle</span>
         <span id="status" class="pill dim"></span>
+        <span class="color-palette">
+          <button class="color-btn" data-color="default" title="Default"></button>
+          <button class="color-btn" data-color="red" title="Red" style="background:#ff4444"></button>
+          <button class="color-btn" data-color="black" title="Black" style="background:#000"></button>
+          <button class="color-btn" data-color="white" title="White" style="background:#fff"></button>
+        </span>
+        <button id="bold-toggle">B</button>
         <button id="collapse">–</button>
         <button id="gear">⚙</button>
       </header>
@@ -87,6 +94,16 @@
               <option value="fast">Fast (snap)</option>
             </select>
           </div>
+        </div>
+        <div class="settings-row two-col">
+          <div>
+            <label>Theme</label>
+            <select id="cfg-theme">
+              <option value="dark">Dark</option>
+              <option value="light">Light (white)</option>
+            </select>
+          </div>
+          <div></div>
         </div>
         <div class="settings-row two-col">
           <div>
